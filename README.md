@@ -22,6 +22,14 @@ The proxy connects to `substrate.office.com` — the same WebSocket API the M365
 - Tool calls and token usage are not supported.
 - **Claude Code:** Agentic features (file reading, bash, code editing) require tool use, which this proxy does not support. Use the proxy for general Q&A only; keep Claude Code on the real Anthropic API for coding tasks.
 
+## Multimodal Status
+
+- OpenAI Chat Completions and OpenAI Responses accept `data:image/...;base64,...` image parts in the final user message.
+- Those images are uploaded to Copilot and forwarded as image attachments on the proxied request.
+- Non-image attachments, remote image URLs, and unsupported image shapes are ignored instead of failing the whole request.
+- Anthropic-style requests stay text-only for now. Any attachment parts are dropped.
+- Earlier user-message images are not preserved across turns yet because the proxy still rebuilds each request as a fresh Copilot conversation.
+
 ---
 
 ## Setup

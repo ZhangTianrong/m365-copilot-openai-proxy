@@ -6,12 +6,15 @@ import uuid
 from collections.abc import AsyncIterator
 from urllib.parse import quote
 
+import httpx
 import websockets
 
+from .models import TranslatedImage, UploadedImage
 from .token_store import decode_jwt_payload
 
 SIGNALR_SEP = "\x1e"
 _WS_BASE = "wss://substrate.office.com/m365Copilot/Chathub"
+_UPLOAD_URL = "https://substrate.office.com/m365Copilot/UploadFile"
 
 _VARIANTS = (
     "EnableMcpServerWidgets,feature.EnableMcpServerWidgets,feature.EnableLuForChatCIQ,"
@@ -32,11 +35,13 @@ _VARIANTS = (
     "cdxgrounding_api_v2_rich_web_answers_reference_bottom_force,"
     "cdxenablerenderforisocomp,feature.EnableClientFileURLSupportForOfficeWebPaidCopilot,"
     "feature.EnableDesignEditorImageGrounding,feature.EnableDesignerEditor,"
+    "feature.EnableBase64DataInMessageAnnotations,feature.EnablePersonalization,"
     "feature.EnableSkipRehydrationForSpeCIdImages,feature.EnableSkipEmittingMessageOnFlush,"
     "feature.EnableRemoveEmptySourceAttributions,feature.EnableRemoveStreamingMode,"
     "feature.OfficeWebToHelix,feature.OfficeDesktopToHelix,feature.M365TeamsHubToHelix,"
     "feature.OwaHubToHelix,feature.MonarchHubToHelix,feature.Win32OutlookHubToHelix,"
-    "feature.MacOutlookHubToHelix,Agt_bizchat_enableGpt5ForHelix"
+    "feature.MacOutlookHubToHelix,Agt_bizchat_enableGpt5ForHelix,"
+    "agt_bizchat_enableRichResponses"
 )
 
 _OPTIONS_SETS = [
@@ -61,6 +66,15 @@ _OPTIONS_SETS = [
     "flux_v3_image_gen_enable_icon_dimensions",
     "flux_v3_image_gen_enable_system_text_with_params",
     "flux_v3_image_gen_enable_designer_dimensions_meta_prompting_in_system_prompts",
+    "flux_v3_image_gen_enable_story",
+    "gptvnorm2048",
+    "rich_responses",
+]
+
+_UPLOAD_OPTIONS_SETS = [
+    "cwcgptvsan",
+    "flux_v3_gptv_enable_upload_multi_image_in_turn_wo_ch",
+    "gptvnorm2048",
 ]
 
 _ALLOWED_MESSAGE_TYPES = [
@@ -72,7 +86,7 @@ _ALLOWED_MESSAGE_TYPES = [
     "TriggerConfirmation", "ResumeInvokeAction", "ResumeUserInputRequest",
     "TriggerUserInputRequest", "EscapeHatch", "TriggerPluginAuth",
     "ResumePluginAuth", "SideBySide", "ReferencesListComplete",
-    "SwitchRespondingEndpoint",
+    "ComputerToolsRoomInfo", "SwitchRespondingEndpoint",
 ]
 
 
@@ -108,7 +122,14 @@ class SubstrateCopilotClient:
             f"&licenseType=Starter&agent=web&scenario=OfficeWebIncludedCopilot"
         )
 
-    def _chat_invoke(self, text: str, conv_id: str, session_id: str, req_id: str) -> str:
+    def _chat_invoke(
+        self,
+        text: str,
+        conv_id: str,
+        session_id: str,
+        req_id: str,
+        uploaded_images: list[UploadedImage],
+    ) -> str:
         payload = {
             "arguments": [{
                 "source": "officeweb",
@@ -129,7 +150,9 @@ class SubstrateCopilotClient:
                     "clientAppName": "Office",
                     "clientEntrypoint": "mcmcopilot-officeweb",
                     "clientSessionId": session_id,
+                    "ProductCategory": "Chat",
                     "clientAppType": "Web",
+                    "productEntryPoint": "ChatPanel",
                     "deviceOS": "Windows",
                     "deviceType": "Desktop",
                 },
@@ -142,6 +165,19 @@ class SubstrateCopilotClient:
                     "locationInfo": {"timeZoneOffset": 9, "timeZone": self._time_zone},
                     "locale": "en-us",
                     "messageType": "Chat",
+                    "messageAnnotations": [
+                        {
+                            "id": image.doc_id,
+                            "messageAnnotationMetadata": {
+                                "@type": "File",
+                                "annotationType": "File",
+                                "fileType": image.file_type,
+                                "fileName": image.file_name,
+                            },
+                            "messageAnnotationType": "ImageFile",
+                        }
+                        for image in uploaded_images
+                    ],
                     "experienceType": "Default",
                     "adaptiveCards": [],
                     "clientPreferences": {},
@@ -150,6 +186,7 @@ class SubstrateCopilotClient:
                 "isSbsSupported": True,
                 "tone": "Magic",
                 "renderReferencesBehindEOS": True,
+                "disconnectBehavior": "continue",
             }],
             "invocationId": "0",
             "target": "chat",
@@ -157,12 +194,74 @@ class SubstrateCopilotClient:
         }
         return json.dumps(payload, ensure_ascii=False) + SIGNALR_SEP
 
-    async def chat_stream(self, prompt: str, additional_context: list[str]) -> AsyncIterator[str]:
+    async def _upload_image(
+        self,
+        image: TranslatedImage,
+        *,
+        conversation_id: str,
+    ) -> UploadedImage:
+        form_fields: list[tuple[str, tuple[None, str]]] = [
+            ("scenario", (None, "UploadImage")),
+            ("conversationId", (None, conversation_id)),
+            ("FileBase64", (None, image.data_url)),
+        ]
+        form_fields.extend(("optionsSets", (None, value)) for value in _UPLOAD_OPTIONS_SETS)
+        headers = {
+            "Authorization": f"Bearer {self._token}",
+            "Accept": "*/*",
+            "Origin": "https://m365.cloud.microsoft",
+            "Referer": "https://m365.cloud.microsoft/",
+            "x-anchormailbox": f"Oid:{self._oid}@{self._tid}",
+            "x-scenario": "OfficeWebIncludedCopilot",
+            "x-variants": "feature.EnableImageSupportInUploadFile",
+        }
+        try:
+            async with httpx.AsyncClient(timeout=60.0) as client:
+                response = await client.post(_UPLOAD_URL, files=form_fields, headers=headers)
+            response.raise_for_status()
+            payload = response.json()
+        except Exception as exc:
+            raise SubstrateCopilotError(f"Image upload failed: {exc}") from exc
+
+        doc_id = payload.get("docId")
+        if not isinstance(doc_id, str) or not doc_id:
+            raise SubstrateCopilotError("Image upload failed: missing docId in UploadFile response.")
+
+        uploaded_file_name = payload.get("fileName")
+        uploaded_file_type = payload.get("fileType")
+        if uploaded_file_type is not None and isinstance(uploaded_file_type, str):
+            uploaded_file_type = uploaded_file_type.removeprefix(".")
+
+        return UploadedImage(
+            doc_id=doc_id,
+            file_name=image.filename,
+            file_type=uploaded_file_type or image.file_extension,
+            uploaded_file_name=uploaded_file_name if isinstance(uploaded_file_name, str) else None,
+        )
+
+    async def _upload_images(self, images: list[TranslatedImage]) -> list[UploadedImage]:
+        if not images:
+            return []
+        conversation_id = str(uuid.uuid4())
+        uploaded_images: list[UploadedImage] = []
+        for image in images:
+            uploaded_images.append(
+                await self._upload_image(image, conversation_id=conversation_id)
+            )
+        return uploaded_images
+
+    async def chat_stream(
+        self,
+        prompt: str,
+        additional_context: list[str],
+        images: list[TranslatedImage] | None = None,
+    ) -> AsyncIterator[str]:
         text = _combine_text(prompt, additional_context)
         conv_id = str(uuid.uuid4())
         session_id = str(uuid.uuid4())
         req_id = str(uuid.uuid4())
         url = self._ws_url(conv_id, session_id, req_id)
+        uploaded_images = await self._upload_images(images or [])
         try:
             async with websockets.connect(
                 url,
@@ -172,7 +271,7 @@ class SubstrateCopilotClient:
             ) as ws:
                 await ws.send(json.dumps({"protocol": "json", "version": 1}) + SIGNALR_SEP)
                 await ws.recv()
-                await ws.send(self._chat_invoke(text, conv_id, session_id, req_id))
+                await ws.send(self._chat_invoke(text, conv_id, session_id, req_id, uploaded_images))
                 fallback_text = ""
                 yielded_any = False
                 async for raw in ws:
@@ -217,9 +316,14 @@ class SubstrateCopilotClient:
         except Exception as exc:
             raise SubstrateCopilotError(str(exc)) from exc
 
-    async def chat(self, prompt: str, additional_context: list[str]) -> str:
+    async def chat(
+        self,
+        prompt: str,
+        additional_context: list[str],
+        images: list[TranslatedImage] | None = None,
+    ) -> str:
         chunks: list[str] = []
-        async for chunk in self.chat_stream(prompt, additional_context):
+        async for chunk in self.chat_stream(prompt, additional_context, images):
             chunks.append(chunk)
         return "".join(chunks)
 
@@ -227,4 +331,6 @@ class SubstrateCopilotClient:
 def _combine_text(prompt: str, context: list[str]) -> str:
     if not context:
         return prompt
+    if not prompt:
+        return "\n\n".join(context)
     return "\n\n".join(context) + "\n\n---\n\n" + prompt

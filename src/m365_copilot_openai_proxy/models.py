@@ -5,11 +5,18 @@ from typing import Any, Literal
 from pydantic import BaseModel, ConfigDict, Field
 
 
+class ImageURLPart(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    url: str
+
+
 class ContentPart(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     type: str
     text: str | None = None
+    image_url: str | ImageURLPart | None = None
 
 
 class OpenAIMessage(BaseModel):
@@ -71,6 +78,22 @@ class OpenAIResponsesRequest(BaseModel):
     stream: bool = False
 
 
+class TranslatedImage(BaseModel):
+    filename: str
+    mime_type: str
+    file_extension: str
+    data_url: str
+    content: bytes
+
+
+class UploadedImage(BaseModel):
+    doc_id: str
+    file_name: str
+    file_type: str
+    uploaded_file_name: str | None = None
+
+
 class TranslatedRequest(BaseModel):
     prompt: str
     additional_context: list[str] = Field(default_factory=list)
+    images: list[TranslatedImage] = Field(default_factory=list)

@@ -67,10 +67,15 @@ def create_app(
                         client,
                         translated.prompt,
                         translated.additional_context,
+                        translated.images,
                     ),
                     media_type="text/event-stream",
                 )
-            text = await client.chat(translated.prompt, translated.additional_context)
+            text = await client.chat(
+                translated.prompt,
+                translated.additional_context,
+                translated.images,
+            )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except SubstrateCopilotError as exc:
@@ -105,12 +110,22 @@ def create_app(
 
         if request.stream:
             return StreamingResponse(
-                _responses_stream(settings.model_alias, client, translated.prompt, translated.additional_context),
+                _responses_stream(
+                    settings.model_alias,
+                    client,
+                    translated.prompt,
+                    translated.additional_context,
+                    translated.images,
+                ),
                 media_type="text/event-stream",
             )
 
         try:
-            text = await client.chat(translated.prompt, translated.additional_context)
+            text = await client.chat(
+                translated.prompt,
+                translated.additional_context,
+                translated.images,
+            )
         except SubstrateCopilotError as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
@@ -169,6 +184,7 @@ async def _openai_stream(
     client: SubstrateCopilotClient,
     prompt: str,
     additional_context: list[str],
+    images,
 ) -> AsyncIterator[str]:
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
@@ -180,7 +196,7 @@ async def _openai_stream(
         "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
     }
     yield f"data: {json.dumps(first_chunk)}\n\n"
-    async for delta in client.chat_stream(prompt, additional_context):
+    async for delta in client.chat_stream(prompt, additional_context, images):
         chunk = {
             "id": completion_id,
             "object": "chat.completion.chunk",
@@ -205,6 +221,7 @@ async def _responses_stream(
     client: SubstrateCopilotClient,
     prompt: str,
     additional_context: list[str],
+    images,
 ) -> AsyncIterator[str]:
     resp_id = f"resp_{uuid.uuid4().hex}"
     item_id = f"msg_{uuid.uuid4().hex}"
@@ -215,7 +232,7 @@ async def _responses_stream(
     yield f"data: {json.dumps({'type': 'response.content_part.added', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': ''}})}\n\n"
 
     full_text = ""
-    async for delta in client.chat_stream(prompt, additional_context):
+    async for delta in client.chat_stream(prompt, additional_context, images):
         full_text += delta
         yield f"data: {json.dumps({'type': 'response.output_text.delta', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'delta': delta})}\n\n"
 
