@@ -11,6 +11,12 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    access_token: str = Field(alias="M365_ACCESS_TOKEN")
+    access_token: str | None = Field(default=None, alias="M365_ACCESS_TOKEN")
+    access_token_file: str = Field(default=".state/access_token.txt", alias="M365_ACCESS_TOKEN_FILE")
+    profile_dir: str = Field(default=".state/profile", alias="M365_PROFILE_DIR")
+    login_url: str = Field(default="https://m365.cloud.microsoft/chat", alias="M365_LOGIN_URL")
+    browser_channel: str | None = Field(default=None, alias="M365_BROWSER_CHANNEL")
+    token_refresh_buffer_seconds: int = Field(default=300, alias="M365_TOKEN_REFRESH_BUFFER_SECONDS")
+    token_refresh_retry_seconds: int = Field(default=30, alias="M365_TOKEN_REFRESH_RETRY_SECONDS")
     time_zone: str = Field(default="Asia/Tokyo", alias="M365_TIME_ZONE")
     model_alias: str = Field(default="m365-copilot", alias="M365_MODEL_ALIAS")

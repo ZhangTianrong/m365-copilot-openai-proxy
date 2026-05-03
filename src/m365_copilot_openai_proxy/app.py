@@ -10,6 +10,7 @@ from fastapi.responses import JSONResponse, StreamingResponse
 
 from .config import Settings
 from .substrate_client import SubstrateCopilotClient, SubstrateCopilotError
+from .token_store import TokenStoreError, load_access_token
 from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest
 from .translator import translate_anthropic_request, translate_openai_request, translate_responses_request
 
@@ -22,14 +23,17 @@ def create_app(
     resolved_settings = settings or Settings()
     app.state.settings = resolved_settings
     app.state.copilot_client_factory = copilot_client_factory or (
-        lambda: SubstrateCopilotClient(resolved_settings.access_token, resolved_settings.time_zone)
+        lambda: SubstrateCopilotClient(load_access_token(resolved_settings), resolved_settings.time_zone)
     )
 
     def get_settings() -> Settings:
         return app.state.settings
 
     def get_copilot_client() -> SubstrateCopilotClient:
-        return app.state.copilot_client_factory()
+        try:
+            return app.state.copilot_client_factory()
+        except (SubstrateCopilotError, TokenStoreError) as exc:
+            raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:

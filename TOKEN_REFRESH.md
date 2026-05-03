@@ -1,78 +1,77 @@
 # Token Refresh Automation Options
 
-The `substrate.office.com` API requires a user JWT that expires in ~1 hour. Admin consent is blocked, so tokens cannot be obtained programmatically via MSAL device code flow. Browser automation is required.
+The `substrate.office.com` API requires a user JWT that expires in about one hour. Admin consent is blocked, so the practical automation path is still browser-backed token capture.
 
-## Current manual flow
+## Current implementation
 
-```powershell
-uv run copilot-openai-proxy set-token
-# paste full WebSocket URL from DevTools → Network → substrate WebSocket → Headers
-```
+This repository now includes a minimal Playwright refresher designed for Ubuntu or Docker-based deployments:
 
----
+- `copilot-openai-proxy login`
+  Creates a persistent browser profile, opens the Copilot page in headed mode, and saves the first token to `M365_ACCESS_TOKEN_FILE`.
+- `copilot-openai-proxy refresh-token`
+  Reuses that profile for a one-shot refresh.
+- `copilot-openai-proxy refresh-daemon`
+  Runs headless, refreshes before expiry, and updates the shared token file in place.
+- `copilot-openai-proxy serve`
+  Reads the token file on demand, so the API does not need to restart after refresh.
 
-## Option A — Playwright (recommended)
+The default persistent paths are:
 
-Launch a hidden browser using the existing Edge user profile (already authenticated). Navigate to M365 Copilot, intercept the WebSocket connection, extract the token, update `.env`, restart the server.
-
-**Pros:** fully automatic, works even if Edge is not open  
-**Cons:** requires `playwright` + `playwright install msedge`, takes ~5s per refresh
-
-Implementation sketch:
-```python
-from playwright.async_api import async_playwright
-
-async def get_fresh_token() -> str:
-    async with async_playwright() as p:
-        browser = await p.chromium.launch_persistent_context(
-            user_data_dir="C:/Users/<user>/AppData/Local/Microsoft/Edge/User Data",
-            channel="msedge",
-            headless=True,
-        )
-        token = None
-        page = await browser.new_page()
-        async def on_websocket(ws):
-            nonlocal token
-            m = re.search(r"access_token=([^&]+)", ws.url)
-            if m:
-                token = m.group(1)
-        page.on("websocket", on_websocket)
-        await page.goto("https://m365.cloud.microsoft/chat")
-        await page.wait_for_timeout(5000)
-        await browser.close()
-        return token
-```
-
-Schedule with `schedule` or `apscheduler` every 50 minutes.
+- token file: `.state/access_token.txt`
+- Playwright profile: `.state/profile`
 
 ---
 
-## Option B — Edge remote debugging (CDP)
+## Option A — Playwright persistent profile
 
-Launch Edge once with the remote debugging flag, then connect to the running browser via CDP without opening a new one.
+This is the preferred path for Linux and Docker deployments.
 
-**One-time setup:** create an Edge shortcut with extra flag:
-```
-"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe" --remote-debugging-port=9222
-```
+How it works:
 
-Then a script connects to `http://localhost:9222` and executes JS in the Copilot tab to extract the token.
+1. Do a one-time interactive sign-in with `copilot-openai-proxy login`.
+2. Persist the browser profile directory.
+3. Run `copilot-openai-proxy refresh-daemon` headlessly.
+4. Share the token file with the API service.
 
-**Pros:** lightweight, no new browser, uses `websockets` (already installed)  
-**Cons:** Edge must always be launched with the debug flag; less reliable if tab is closed
+Why this is the right default:
+
+- no Edge remote debugging requirement
+- no dependence on your day-to-day desktop browser profile
+- works naturally with a dedicated Docker volume or host directory
+- keeps the automation scope narrow: just sign in once, then refresh the Copilot token
+
+Tradeoffs:
+
+- requires Playwright and a browser runtime
+- the first login still needs a headed browser session
+
+---
+
+## Option B — Edge remote debugging (legacy Windows path)
+
+The repository previously had a lightweight CDP-based refresh path aimed at a Windows-hosted Edge session started with `--remote-debugging-port=9222`.
+
+That approach is still reasonable if all of the following are true:
+
+- you are staying on Windows
+- you want to reuse an already-open Edge session
+- you do not mind launching Edge with a debugging flag
+
+It is not the preferred path for Ubuntu or Docker deployments.
 
 ---
 
 ## Option C — Windows WAM / MSAL broker
 
-`msal` with `allow_broker=True` on Windows 10/11 uses the OS-level Web Account Manager. Investigated but **not viable** — WAM token caches are per-app and the `substrate.office.com` resource requires pre-authorization (`AADSTS65002`), which blocks even cached token reuse from external client IDs.
+`msal` with `allow_broker=True` was investigated earlier but is not sufficient here. The `substrate.office.com` resource still requires pre-authorization and cannot be cleanly reused through an external client ID.
 
 ---
 
-## Option D — Admin consent (cleanest long-term fix)
+## Option D — Admin consent
 
-Ask the IT admin to either:
-1. Register a new Entra app and grant delegated Graph permissions (original approach), or
-2. Grant admin consent for the `Microsoft Graph Command Line Tools` app (`14d82eec-...`)
+This remains the cleanest long-term fix if your IT admin is willing to help:
 
-Either removes the need for token automation entirely.
+1. Register a dedicated Entra app and grant the required delegated permissions.
+2. Or grant admin consent for an existing Microsoft first-party CLI app that exposes the needed resource.
+
+Either path would remove the need for browser automation entirely.

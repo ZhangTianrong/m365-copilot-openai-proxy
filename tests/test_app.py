@@ -24,7 +24,7 @@ class FakeCopilotClient:
 
 
 def build_client(fake: FakeCopilotClient) -> TestClient:
-    settings = Settings(M365_ACCESS_TOKEN="fake-token")
+    settings = Settings(_env_file=None, M365_ACCESS_TOKEN="fake-token")
     app = create_app(settings=settings, copilot_client_factory=lambda: fake)
     return TestClient(app)
 

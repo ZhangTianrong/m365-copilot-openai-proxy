@@ -16,7 +16,7 @@ The proxy connects to `substrate.office.com` — the same WebSocket API the M365
 
 ## Constraints
 
-- Token expires in ~1 hour and must be refreshed manually.
+- Token expires in ~1 hour. A Playwright refresher is included for one-time login plus automatic refresh.
 - Each request starts a new Copilot conversation (no persistent sessions).
 - System prompts and conversation history are folded into the message as plain text.
 - Tool calls and token usage are not supported.
@@ -29,24 +29,24 @@ The proxy connects to `substrate.office.com` — the same WebSocket API the M365
 ### 1. Install
 
 ```powershell
-uv sync
+uv sync --extra refresh
 ```
 
-### 2. Get your token
-
-1. Open [https://m365.cloud.microsoft/chat](https://m365.cloud.microsoft/chat) in Edge or Chrome and sign in.
-2. Open DevTools (`F12`) → **Network** tab.
-3. Type anything in Copilot and send it.
-4. Filter by `substrate` — click the WebSocket entry (`e85750e2-...`).
-5. Go to **Headers** → right-click the **Request URL** → **Copy link address**.
-
-### 3. Save the token
+### 2. One-time login
 
 ```powershell
-uv run copilot-openai-proxy set-token
+uv run copilot-openai-proxy login
 ```
 
-Paste the copied WebSocket URL when prompted. The token is extracted automatically and written to `.env`.
+This creates a persistent Playwright browser profile under `.state/profile`, waits for the Copilot page to authenticate, and saves the current token to `.state/access_token.txt`.
+
+### 3. Start the refresher
+
+```powershell
+uv run copilot-openai-proxy refresh-daemon
+```
+
+The refresher reuses the persistent profile, refreshes the token before expiry, and updates the shared token file in place.
 
 ### 4. Start the server
 
@@ -60,17 +60,44 @@ Server runs at `http://127.0.0.1:8000` by default.
 uv run copilot-openai-proxy serve --host 127.0.0.1 --port 8000
 ```
 
+The API reads the token from `M365_ACCESS_TOKEN_FILE` on demand, so refreshed tokens are picked up without restarting the server.
+
 ---
 
-## Token refresh
+## Docker Compose
 
-Tokens expire in ~1 hour. When the server returns a `502` with an expiry message, repeat steps 2–3 above:
+The repository includes a two-service Compose stack for Ubuntu hosts:
+
+```powershell
+docker compose up -d --build
+```
+
+- `api` serves the OpenAI-compatible HTTP API.
+- `token-refresher` runs the Playwright refresh daemon and persists its browser profile in `./state/profile`.
+
+For the first login, run a one-shot interactive browser session against the same shared volume. On an Ubuntu desktop session:
+
+```bash
+docker compose run --rm \
+  -e DISPLAY=$DISPLAY \
+  -v /tmp/.X11-unix:/tmp/.X11-unix \
+  token-refresher \
+  copilot-openai-proxy login
+```
+
+Once that finishes, `docker compose up -d` is enough for normal headless operation.
+
+---
+
+## Manual fallback
+
+If you want to bypass Playwright entirely, you can still paste a token manually:
 
 ```powershell
 uv run copilot-openai-proxy set-token
 ```
 
-Then restart the server.
+Paste either the full WebSocket URL or just the `access_token` value. It will be written to the token file.
 
 ---
 
@@ -170,12 +197,18 @@ $r.content[0].text
 
 | Variable | Default | Description |
 |---|---|---|
-| `M365_ACCESS_TOKEN` | required | Bearer token from browser WebSocket URL |
+| `M365_ACCESS_TOKEN` | unset | Fallback bearer token when no token file exists |
+| `M365_ACCESS_TOKEN_FILE` | `.state/access_token.txt` | Shared token file used by the API and refresher |
+| `M365_PROFILE_DIR` | `.state/profile` | Persistent Playwright browser profile |
+| `M365_LOGIN_URL` | `https://m365.cloud.microsoft/chat` | Page the refresher opens to obtain a token |
+| `M365_BROWSER_CHANNEL` | unset | Optional Playwright browser channel such as `msedge` |
+| `M365_TOKEN_REFRESH_BUFFER_SECONDS` | `300` | Refresh token this many seconds before expiry |
+| `M365_TOKEN_REFRESH_RETRY_SECONDS` | `30` | Retry delay after refresh failures |
 | `M365_TIME_ZONE` | `Asia/Tokyo` | Time zone sent with each request |
 | `M365_MODEL_ALIAS` | `m365-copilot` | Model name returned by `/v1/models` |
 
 ---
 
-## Token automation (future)
+## Token automation notes
 
-See [TOKEN_REFRESH.md](TOKEN_REFRESH.md) for options to automate token refresh (Playwright, Edge CDP).
+See [TOKEN_REFRESH.md](TOKEN_REFRESH.md) for the design tradeoffs between Playwright, Edge CDP, and the older manual flow.

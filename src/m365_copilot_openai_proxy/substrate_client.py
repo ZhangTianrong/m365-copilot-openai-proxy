@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import base64
 import json
 import time
 import uuid
@@ -8,6 +7,8 @@ from collections.abc import AsyncIterator
 from urllib.parse import quote
 
 import websockets
+
+from .token_store import decode_jwt_payload
 
 SIGNALR_SEP = "\x1e"
 _WS_BASE = "wss://substrate.office.com/m365Copilot/Chathub"
@@ -78,26 +79,18 @@ _ALLOWED_MESSAGE_TYPES = [
 class SubstrateCopilotError(RuntimeError):
     pass
 
-
-def _decode_jwt_payload(token: str) -> dict:
-    payload = token.split(".")[1]
-    payload += "=" * (-len(payload) % 4)
-    return json.loads(base64.urlsafe_b64decode(payload))
-
-
 class SubstrateCopilotClient:
     def __init__(self, access_token: str, time_zone: str = "Asia/Tokyo"):
         self._token = access_token
         self._time_zone = time_zone
         try:
-            claims = _decode_jwt_payload(access_token)
+            claims = decode_jwt_payload(access_token)
         except Exception as exc:
             raise SubstrateCopilotError(f"Cannot decode access token: {exc}") from exc
         if time.time() > claims.get("exp", 0):
             raise SubstrateCopilotError(
-                "Access token expired. To refresh: open M365 Copilot in your browser, "
-                "DevTools → Network → filter 'substrate' → click the WebSocket → Headers → "
-                "copy the access_token= query param → update M365_ACCESS_TOKEN in .env"
+                "Access token expired. Refresh the shared token file with "
+                "`copilot-openai-proxy refresh-token` or restart the Playwright refresh daemon."
             )
         self._oid: str = claims["oid"]
         self._tid: str = claims["tid"]

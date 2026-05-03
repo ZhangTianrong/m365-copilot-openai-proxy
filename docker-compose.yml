@@ -1,0 +1,27 @@
+services:
+  api:
+    build: .
+    command: ["copilot-openai-proxy", "serve", "--host", "0.0.0.0", "--port", "8000"]
+    ports:
+      - "8000:8000"
+    environment:
+      M365_ACCESS_TOKEN_FILE: /data/access_token.txt
+      M365_TIME_ZONE: ${M365_TIME_ZONE:-Asia/Tokyo}
+      M365_MODEL_ALIAS: ${M365_MODEL_ALIAS:-m365-copilot}
+    volumes:
+      - ./state:/data
+    depends_on:
+      - token-refresher
+
+  token-refresher:
+    build: .
+    command: ["copilot-openai-proxy", "refresh-daemon"]
+    environment:
+      M365_ACCESS_TOKEN_FILE: /data/access_token.txt
+      M365_PROFILE_DIR: /data/profile
+      M365_LOGIN_URL: ${M365_LOGIN_URL:-https://m365.cloud.microsoft/chat}
+      M365_TOKEN_REFRESH_BUFFER_SECONDS: ${M365_TOKEN_REFRESH_BUFFER_SECONDS:-300}
+      M365_TOKEN_REFRESH_RETRY_SECONDS: ${M365_TOKEN_REFRESH_RETRY_SECONDS:-30}
+    shm_size: 1gb
+    volumes:
+      - ./state:/data
