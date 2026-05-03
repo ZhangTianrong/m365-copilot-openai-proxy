@@ -8,6 +8,10 @@ This repository now includes a minimal Playwright refresher designed for Ubuntu 
 
 - `copilot-openai-proxy login`
   Creates a persistent browser profile, opens the Copilot page in headed mode, and saves the first token to `M365_ACCESS_TOKEN_FILE`.
+- `copilot-openai-proxy login --cookies cookies.json --headless`
+  Imports cookies from an existing browser session into the persistent profile and tries to bootstrap the first token without a manual GUI login.
+- `copilot-openai-proxy import-cookies cookies.json`
+  Seeds the persistent Playwright profile from a cookie export without immediately requesting a token.
 - `copilot-openai-proxy refresh-token`
   Reuses that profile for a one-shot refresh.
 - `copilot-openai-proxy refresh-daemon`
@@ -43,7 +47,8 @@ Why this is the right default:
 Tradeoffs:
 
 - requires Playwright and a browser runtime
-- the first login still needs a headed browser session
+- the default first login flow still needs a headed browser session
+- cookie bootstrap can avoid the first headed login, but only if the exported cookies are still valid and tenant policies do not force an interactive challenge
 
 ---
 

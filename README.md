@@ -40,6 +40,19 @@ uv run copilot-openai-proxy login
 
 This creates a persistent Playwright browser profile under `.state/profile`, waits for the Copilot page to authenticate, and saves the current token to `.state/access_token.txt`.
 
+If you already have cookies exported from a logged-in Copilot browser session, you can bootstrap the persistent Playwright profile without a manual sign-in:
+
+```powershell
+uv run copilot-openai-proxy login --cookies cookies.json --headless
+```
+
+The cookie file must be JSON in either of these shapes:
+
+- a top-level array of cookie objects
+- an object with a top-level `cookies` array, such as a Playwright storage-state export
+
+Cookie objects must include `name`, `value`, and either `url` or `domain`.
+
 ### 3. Start the refresher
 
 ```powershell
@@ -75,17 +88,55 @@ docker compose up -d --build
 - `api` serves the OpenAI-compatible HTTP API.
 - `token-refresher` runs the Playwright refresh daemon and persists its browser profile in `./state/profile`.
 
-For the first login, run a one-shot interactive browser session against the same shared volume. On an Ubuntu desktop session:
+For the first login, run a one-shot interactive browser session against the same shared volume. On an Ubuntu X11 desktop session, authorize the container's `root` user first:
+
+```bash
+xhost +SI:localuser:root
+```
+
+Then launch the login flow with the host display, X11 socket, and Xauthority file mounted into the container:
 
 ```bash
 docker compose run --rm \
-  -e DISPLAY=$DISPLAY \
+  -e DISPLAY=:0 \
+  -e XAUTHORITY=/run/user/1000/gdm/Xauthority \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
+  -v /run/user/1000/gdm/Xauthority:/run/user/1000/gdm/Xauthority:ro \
   token-refresher \
   copilot-openai-proxy login
 ```
 
-Once that finishes, `docker compose up -d` is enough for normal headless operation.
+If your desktop session uses a different Xauthority path, substitute the correct host path.
+
+After the Copilot page finishes loading, the token is usually captured automatically. If the command does not exit after sign-in, click into the Copilot chat box and type a character to trigger the WebSocket request that carries the token. You do not need to submit the message.
+
+Once `Token saved to /data/access_token.txt.` is printed and the command exits, `docker compose up -d` is enough for normal headless operation.
+
+After a successful headed login, you can snapshot the authenticated Playwright profile's cookies for later cookie-only bootstrap tests:
+
+```bash
+docker compose run --rm \
+  token-refresher \
+  copilot-openai-proxy export-cookies /data/cookies.json
+```
+
+If you already have exported cookies, you can seed the shared Playwright profile first:
+
+```bash
+docker compose run --rm \
+  token-refresher \
+  copilot-openai-proxy import-cookies /data/cookies.json
+```
+
+Then either run a headless token bootstrap:
+
+```bash
+docker compose run --rm \
+  token-refresher \
+  copilot-openai-proxy login --cookies /data/cookies.json --headless
+```
+
+Or start the normal daemon and let it refresh from the seeded profile.
 
 ---
 
