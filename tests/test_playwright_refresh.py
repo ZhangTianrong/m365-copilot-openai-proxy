@@ -1,16 +1,15 @@
 from __future__ import annotations
 
 import asyncio
-import json
 
 from m365_copilot_openai_proxy.config import Settings
 from m365_copilot_openai_proxy.playwright_refresh import (
+    _advance_login_flow,
     _capture_token,
-    export_cookies_with_playwright,
-    import_cookies_with_playwright,
-    load_cookies,
     login_with_playwright,
+    run_refresh_daemon,
 )
+from m365_copilot_openai_proxy.token_store import TokenStoreError
 
 
 class FakePage:
@@ -18,6 +17,16 @@ class FakePage:
         self._evaluate_values = list(evaluate_values)
         self.events: dict[str, object] = {}
         self.goto_calls: list[tuple[str, str]] = []
+        self.locator_calls: list[str] = []
+        self.clicked_selectors: list[str] = []
+        self.typed_text: list[str] = []
+        self.pressed_keys: list[str] = []
+        self.url = "https://m365.cloud.microsoft/chat"
+        self.wait_calls: list[int] = []
+        self.body_text = ""
+        self.selector_counts: dict[str, int] = {}
+        self.click_hooks: dict[str, object] = {}
+        self.filled_values: list[str] = []
 
     def on(self, event: str, handler) -> None:
         self.events[event] = handler
@@ -30,20 +39,52 @@ class FakePage:
             return self._evaluate_values.pop(0)
         return None
 
+    def locator(self, selector: str):
+        self.locator_calls.append(selector)
+        return FakeLocator(self, selector)
+
+    async def wait_for_timeout(self, timeout_ms: int) -> None:
+        self.wait_calls.append(timeout_ms)
+
+
+class FakeLocator:
+    def __init__(self, page: FakePage, selector: str):
+        self.page = page
+        self.selector = selector
+
+    @property
+    def first(self):
+        return self
+
+    async def count(self) -> int:
+        return self.page.selector_counts.get(self.selector, 0)
+
+    async def click(self, timeout: int | None = None) -> None:
+        self.page.clicked_selectors.append(f"{self.selector}:{timeout}")
+        hook = self.page.click_hooks.get(self.selector)
+        if callable(hook):
+            hook()
+
+    async def fill(self, value: str) -> None:
+        self.page.filled_values.append(f"{self.selector}:{value}")
+
+    async def press_sequentially(self, text: str, delay: int | None = None) -> None:
+        self.page.typed_text.append(f"{self.selector}:{text}:{delay}")
+
+    async def press(self, key: str) -> None:
+        self.page.pressed_keys.append(f"{self.selector}:{key}")
+
+    async def inner_text(self) -> str:
+        if self.selector == "body":
+            return self.page.body_text
+        return ""
+
 
 class FakeContext:
     def __init__(self, page: FakePage):
         self.pages = [page]
         self.closed = False
-        self.cookies: list[dict[str, object]] | None = None
-        self.existing_cookies: list[dict[str, object]] = []
         self.page_handler = None
-
-    async def add_cookies(self, cookies: list[dict[str, object]]) -> None:
-        self.cookies = cookies
-
-    async def cookies(self) -> list[dict[str, object]]:
-        return list(self.existing_cookies)
 
     async def new_page(self) -> FakePage:
         return self.pages[0]
@@ -114,125 +155,189 @@ def test_capture_token_keeps_polling_after_wait_timeout(monkeypatch, tmp_path) -
 
     assert token == "eyJ.fake"
     assert page.goto_calls == [(settings.login_url, "domcontentloaded")]
+    assert page.clicked_selectors
+    assert page.typed_text
+    assert page.pressed_keys
 
 
-def test_load_cookies_normalizes_browser_export(tmp_path) -> None:
-    cookies_path = tmp_path / "cookies.json"
-    cookies_path.write_text(
-        json.dumps(
-            {
-                "cookies": [
-                    {
-                        "name": "M365Auth",
-                        "value": "secret",
-                        "domain": ".microsoft.com",
-                        "path": "/",
-                        "expirationDate": 1893456000,
-                        "httpOnly": True,
-                        "secure": True,
-                        "sameSite": "no_restriction",
-                    }
-                ]
-            }
-        ),
-        encoding="utf-8",
-    )
+def test_advance_login_flow_clicks_account_picker_tile() -> None:
+    page = FakePage([])
+    page.url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+    page.selector_counts['div[role="button"][data-test-id]'] = 1
 
-    cookies = load_cookies(cookies_path)
+    def after_click():
+        page.url = "https://m365.cloud.microsoft/chat"
 
-    assert cookies == [
-        {
-            "name": "M365Auth",
-            "value": "secret",
-            "domain": ".microsoft.com",
-            "path": "/",
-            "expires": 1893456000.0,
-            "httpOnly": True,
-            "secure": True,
-            "sameSite": "None",
-        }
-    ]
+    page.click_hooks['div[role="button"][data-test-id]'] = after_click
+
+    settings = Settings(_env_file=None)
+    asyncio.run(_advance_login_flow(page, settings))
+
+    assert page.clicked_selectors == ['div[role="button"][data-test-id]:5000']
+    assert page.wait_calls == [2000]
 
 
-def test_login_with_cookies_imports_into_profile_and_saves_token(monkeypatch, tmp_path) -> None:
-    page = FakePage(["eyJ.cookie-token"])
-    context = install_fake_playwright(monkeypatch, page)
+def test_advance_login_flow_raises_on_password_prompt() -> None:
+    page = FakePage([])
+    page.url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+    page.body_text = "Enter password\nForgot my password"
 
-    cookies_path = tmp_path / "cookies.json"
-    cookies_path.write_text(
-        json.dumps([{"name": "session", "value": "abc", "domain": ".microsoft.com", "path": "/"}]),
-        encoding="utf-8",
-    )
+    try:
+        settings = Settings(_env_file=None)
+        asyncio.run(_advance_login_flow(page, settings))
+    except Exception as exc:
+        assert str(exc) == (
+            "Saved Playwright profile needs interactive reauthentication: "
+            "Microsoft is prompting for the account password."
+        )
+    else:
+        raise AssertionError("Expected interactive reauthentication error.")
 
+
+def test_advance_login_flow_allows_manual_password_prompt_when_requested() -> None:
+    page = FakePage([])
+    page.url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+    page.body_text = "Enter password\nForgot my password"
+
+    settings = Settings(_env_file=None)
+    asyncio.run(_advance_login_flow(page, settings, allow_manual_reauth=True))
+
+
+def test_advance_login_flow_fills_email_page_when_credentials_exist() -> None:
+    page = FakePage([])
+    page.url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+    page.selector_counts["#i0116"] = 1
+    page.selector_counts["#idSIButton9"] = 1
     settings = Settings(
         _env_file=None,
-        M365_PROFILE_DIR=str(tmp_path / "profile"),
+        M365_LOGIN_EMAIL="user@example.com",
+        M365_LOGIN_PASSWORD="secret",
+        M365_LOGIN_TOTP_SECRET="JBSWY3DPEHPK3PXP",
+    )
+
+    asyncio.run(_advance_login_flow(page, settings))
+
+    assert page.filled_values == ["#i0116:user@example.com"]
+    assert page.clicked_selectors == ["#i0116:1000", "#idSIButton9:5000"]
+
+
+def test_advance_login_flow_fills_password_page_when_credentials_exist() -> None:
+    page = FakePage([])
+    page.url = "https://login.microsoftonline.com/common/oauth2/v2.0/authorize"
+    page.selector_counts["#i0118"] = 1
+    page.selector_counts["#idSIButton9"] = 1
+    settings = Settings(
+        _env_file=None,
+        M365_LOGIN_EMAIL="user@example.com",
+        M365_LOGIN_PASSWORD="secret",
+        M365_LOGIN_TOTP_SECRET="JBSWY3DPEHPK3PXP",
+    )
+
+    asyncio.run(_advance_login_flow(page, settings))
+
+    assert page.filled_values == ["#i0118:secret"]
+    assert page.clicked_selectors == ["#i0118:1000", "#idSIButton9:5000"]
+
+
+def test_refresh_daemon_forces_refresh_on_startup(monkeypatch, tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
         M365_ACCESS_TOKEN_FILE=str(tmp_path / "access_token.txt"),
+        M365_TOKEN_CAPTURE_TIMEOUT_SECONDS=456,
+        M365_TOKEN_REFRESH_BUFFER_SECONDS=300,
+    )
+    settings_path = tmp_path / "access_token.txt"
+    settings_path.write_text("existing-token\n", encoding="utf-8")
+    calls: list[str] = []
+    refresh_timeouts: list[int] = []
+
+    def fake_load_access_token(_settings: Settings) -> str:
+        calls.append("load")
+        return settings_path.read_text(encoding="utf-8").strip()
+
+    async def fake_refresh_token_with_playwright(_settings: Settings, *, headed: bool = False, timeout_seconds: int = 90):
+        calls.append("refresh")
+        refresh_timeouts.append(timeout_seconds)
+        settings_path.write_text("new-token\n", encoding="utf-8")
+        return settings_path
+
+    def fake_token_needs_refresh(_token: str, _buffer_seconds: int) -> bool:
+        calls.append("needs-refresh")
+        return False
+
+    def fake_token_expires_at(_token: str) -> int:
+        return 9999999999
+
+    class StopDaemon(Exception):
+        pass
+
+    async def fake_sleep(_delay: float) -> None:
+        raise StopDaemon()
+
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.load_access_token", fake_load_access_token)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.refresh_token_with_playwright", fake_refresh_token_with_playwright)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.token_needs_refresh", fake_token_needs_refresh)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.token_expires_at", fake_token_expires_at)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.asyncio.sleep", fake_sleep)
+
+    try:
+        asyncio.run(run_refresh_daemon(settings))
+    except StopDaemon:
+        pass
+
+    assert calls[:3] == ["load", "refresh", "load"]
+    assert refresh_timeouts == [settings.token_capture_timeout_seconds]
+
+
+def test_refresh_daemon_retries_startup_refresh_until_success(monkeypatch, tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
+        M365_ACCESS_TOKEN_FILE=str(tmp_path / "access_token.txt"),
+        M365_TOKEN_REFRESH_RETRY_SECONDS=30,
+    )
+    settings_path = tmp_path / "access_token.txt"
+    settings_path.write_text("existing-token\n", encoding="utf-8")
+    refresh_attempts = {"count": 0}
+    sleep_delays: list[float] = []
+
+    def fake_load_access_token(_settings: Settings) -> str:
+        return settings_path.read_text(encoding="utf-8").strip()
+
+    async def fake_refresh_token_with_playwright(_settings: Settings, *, headed: bool = False, timeout_seconds: int = 90):
+        refresh_attempts["count"] += 1
+        if refresh_attempts["count"] == 1:
+            raise RuntimeError("boom")
+        settings_path.write_text("new-token\n", encoding="utf-8")
+        return settings_path
+
+    def fake_token_needs_refresh(_token: str, _buffer_seconds: int) -> bool:
+        return False
+
+    def fake_token_expires_at(_token: str) -> int:
+        return 9999999999
+
+    class StopDaemon(Exception):
+        pass
+
+    async def fake_sleep(delay: float) -> None:
+        sleep_delays.append(delay)
+        if len(sleep_delays) >= 2:
+            raise StopDaemon()
+
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.load_access_token", fake_load_access_token)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.refresh_token_with_playwright", fake_refresh_token_with_playwright)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.token_needs_refresh", fake_token_needs_refresh)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.token_expires_at", fake_token_expires_at)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.asyncio.sleep", fake_sleep)
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_refresh.PlaywrightRefreshError",
+        RuntimeError,
     )
 
-    token_path = asyncio.run(
-        login_with_playwright(
-            settings,
-            timeout_seconds=3,
-            headed=False,
-            cookies_path=cookies_path,
-        )
-    )
+    try:
+        asyncio.run(run_refresh_daemon(settings))
+    except StopDaemon:
+        pass
 
-    assert context.cookies == [
-        {
-            "name": "session",
-            "value": "abc",
-            "domain": ".microsoft.com",
-            "path": "/",
-        }
-    ]
-    assert token_path.read_text(encoding="utf-8") == "eyJ.cookie-token\n"
-
-
-def test_import_cookies_with_playwright_seeds_profile(monkeypatch, tmp_path) -> None:
-    page = FakePage([])
-    context = install_fake_playwright(monkeypatch, page)
-
-    cookies_path = tmp_path / "cookies.json"
-    cookies_path.write_text(
-        json.dumps([{"name": "session", "value": "abc", "url": "https://m365.cloud.microsoft/"}]),
-        encoding="utf-8",
-    )
-
-    settings = Settings(_env_file=None, M365_PROFILE_DIR=str(tmp_path / "profile"))
-    count = asyncio.run(import_cookies_with_playwright(settings, cookies_path))
-
-    assert count == 1
-    assert context.cookies == [
-        {
-            "name": "session",
-            "value": "abc",
-            "url": "https://m365.cloud.microsoft/",
-        }
-    ]
-
-
-def test_export_cookies_with_playwright_writes_profile_snapshot(monkeypatch, tmp_path) -> None:
-    page = FakePage([])
-    context = install_fake_playwright(monkeypatch, page)
-    context.existing_cookies = [
-        {
-            "name": "session",
-            "value": "abc",
-            "domain": ".microsoft.com",
-            "path": "/",
-            "expires": 1893456000,
-            "httpOnly": True,
-            "secure": True,
-            "sameSite": "Lax",
-        }
-    ]
-
-    settings = Settings(_env_file=None, M365_PROFILE_DIR=str(tmp_path / "profile"))
-    output_path, count = asyncio.run(
-        export_cookies_with_playwright(settings, tmp_path / "cookies-export.json")
-    )
-
-    assert count == 1
-    assert output_path.read_text(encoding="utf-8") == json.dumps(context.existing_cookies, indent=2) + "\n"
+    assert refresh_attempts["count"] == 2
+    assert sleep_delays[0] == settings.token_refresh_retry_seconds

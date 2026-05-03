@@ -73,14 +73,17 @@ def _extract_openai_content(
     content: str | list[ContentPart] | None,
     *,
     allow_images: bool,
-) -> tuple[str, list[TranslatedImage]]:
+    image_offset: int,
+) -> tuple[str, list[TranslatedImage], list[str]]:
     if content is None:
-        return "", []
+        return "", [], []
     if isinstance(content, str):
-        return content, []
+        return content, [], []
 
     text_parts: list[str] = []
     images: list[TranslatedImage] = []
+    image_refs: list[str] = []
+    next_image_index = image_offset
     for part in content:
         if part.type in {"text", "input_text"}:
             text_parts.append(part.text or "")
@@ -92,12 +95,24 @@ def _extract_openai_content(
             if not isinstance(raw_image_url, str) or not raw_image_url:
                 continue
             try:
-                images.append(_parse_image_data_url(raw_image_url, image_index=len(images) + 1))
+                images.append(_parse_image_data_url(raw_image_url, image_index=next_image_index))
+                image_refs.append(f"[Image {next_image_index}]")
+                next_image_index += 1
             except ValueError:
                 continue
             continue
 
-    return "".join(text_parts), images
+    return "".join(text_parts), images, image_refs
+
+
+def _render_message_text(text: str, image_refs: list[str]) -> str:
+    text = text.strip()
+    if not image_refs:
+        return text
+    image_line = "Attached images for this message: " + ", ".join(image_refs)
+    if not text:
+        return image_line
+    return f"{text}\n\n{image_line}"
 
 
 def translate_openai_request(request: OpenAIChatRequest) -> TranslatedRequest:
@@ -108,23 +123,24 @@ def translate_openai_request(request: OpenAIChatRequest) -> TranslatedRequest:
 
     for index, message in enumerate(request.messages):
         is_last = index == len(request.messages) - 1
-        text, message_images = _extract_openai_content(
+        text, message_images, image_refs = _extract_openai_content(
             message.content,
-            allow_images=is_last and message.role == "user",
+            allow_images=message.role == "user",
+            image_offset=len(images) + 1,
         )
-        text = text.strip()
-        if not text and not message_images:
+        rendered_text = _render_message_text(text, image_refs)
+        if not rendered_text and not message_images:
             continue
+        images.extend(message_images)
         if message.role in {"system", "developer"}:
-            system_lines.append(text)
+            system_lines.append(rendered_text)
             continue
         if is_last:
             if message.role != "user":
                 raise ValueError("The final OpenAI message must be a user message.")
-            prompt = text
-            images = message_images
+            prompt = rendered_text
             continue
-        transcript_lines.append(f"{message.role.capitalize()}: {text}")
+        transcript_lines.append(f"{message.role.capitalize()}: {rendered_text}")
 
     additional_context: list[str] = []
     system_text = _join_lines(system_lines)
@@ -157,25 +173,26 @@ def translate_responses_request(request: OpenAIResponsesRequest) -> TranslatedRe
         is_last = index == len(items) - 1
         if isinstance(content, list):
             parts = [ContentPart.model_validate(part) if isinstance(part, dict) else ContentPart(type="text", text=str(part)) for part in content]
-            text, item_images = _extract_openai_content(
+            text, item_images, image_refs = _extract_openai_content(
                 parts,
-                allow_images=is_last and role == "user",
+                allow_images=role == "user",
+                image_offset=len(images) + 1,
             )
         else:
-            text, item_images = (content, [])
-        text = text.strip()
-        if not text and not item_images:
+            text, item_images, image_refs = (content, [], [])
+        rendered_text = _render_message_text(text, image_refs)
+        if not rendered_text and not item_images:
             continue
+        images.extend(item_images)
         if role in {"system", "developer"}:
-            system_lines.append(text)
+            system_lines.append(rendered_text)
             continue
         if is_last:
             if role != "user":
                 raise ValueError("The final OpenAI input item must be a user message.")
-            prompt = text
-            images = item_images
+            prompt = rendered_text
             continue
-        transcript_lines.append(f"{role.capitalize()}: {text}")
+        transcript_lines.append(f"{role.capitalize()}: {rendered_text}")
     additional_context: list[str] = []
     system_text = _join_lines(system_lines)
     if system_text:

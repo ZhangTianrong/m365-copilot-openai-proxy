@@ -98,7 +98,7 @@ def test_openai_chat_completion_supports_data_url_images() -> None:
     )
     assert response.status_code == 200
     prompt, additional_context, images = fake.calls[0]
-    assert prompt == "What is in this image?"
+    assert prompt == "What is in this image?\n\nAttached images for this message: [Image 1]"
     assert additional_context == []
     assert len(images) == 1
     assert images[0].mime_type == "image/png"
@@ -174,7 +174,7 @@ def test_openai_responses_support_data_url_images() -> None:
     )
     assert response.status_code == 200
     prompt, additional_context, images = fake.calls[0]
-    assert prompt == "Identify this image"
+    assert prompt == "Identify this image\n\nAttached images for this message: [Image 1]"
     assert additional_context == []
     assert len(images) == 1
     assert images[0].mime_type == "image/webp"
@@ -205,7 +205,7 @@ def test_anthropic_messages_drop_images() -> None:
     assert fake.calls == [("", [], [])]
 
 
-def test_openai_chat_completion_drops_images_outside_final_user_message() -> None:
+def test_openai_chat_completion_preserves_images_outside_final_user_message() -> None:
     fake = FakeCopilotClient()
     client = build_client(fake)
     response = client.post(
@@ -228,10 +228,52 @@ def test_openai_chat_completion_drops_images_outside_final_user_message() -> Non
     assert fake.calls == [
         (
             "Second question",
-            ["Prior conversation transcript:\nUser: First question"],
-            [],
+            ["Prior conversation transcript:\nUser: First question\n\nAttached images for this message: [Image 1]"],
+            [
+                TranslatedImage(
+                    filename="image.png",
+                    mime_type="image/png",
+                    file_extension="png",
+                    data_url="data:image/png;base64,aGVsbG8=",
+                    content=b"hello",
+                )
+            ],
         )
     ]
+
+
+def test_openai_chat_completion_numbers_history_and_final_images_together() -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Earlier"},
+                        {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Now compare"},
+                        {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64,d29ybGQ="}},
+                    ],
+                },
+            ],
+        },
+    )
+    assert response.status_code == 200
+    prompt, additional_context, images = fake.calls[0]
+    assert prompt == "Now compare\n\nAttached images for this message: [Image 2]"
+    assert additional_context == [
+        "Prior conversation transcript:\nUser: Earlier\n\nAttached images for this message: [Image 1]"
+    ]
+    assert [image.filename for image in images] == ["image.png", "image-2.jpg"]
 
 
 def test_anthropic_messages_endpoint() -> None:

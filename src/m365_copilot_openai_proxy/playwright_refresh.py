@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import json
 import re
 import time
 from pathlib import Path
@@ -35,6 +34,27 @@ _STORAGE_JS = """
 })()
 """
 
+_CHATBOX_SELECTORS = (
+    'textarea',
+    '[role="textbox"]',
+    '[contenteditable="true"]',
+)
+_EMAIL_SELECTOR = "#i0116"
+_PASSWORD_SELECTOR = "#i0118"
+_SUBMIT_SELECTOR = "#idSIButton9"
+_USE_ANOTHER_ACCOUNT_SELECTOR = "#otherTile"
+_ACCOUNT_TILE_SELECTOR = 'div[role="button"][data-test-id]'
+_TOTP_SELECTORS = (
+    "#idTxtBx_SAOTCC_OTC",
+    'input[name="otc"]',
+    'input[autocomplete="one-time-code"]',
+    'input[inputmode="numeric"]',
+)
+_TOTP_CONTINUE_SELECTORS = (
+    "#idSubmit_SAOTCC_Continue",
+    "#idSIButton9",
+)
+
 
 class PlaywrightRefreshError(RuntimeError):
     pass
@@ -60,80 +80,148 @@ def _extract_token(raw: str | None) -> str | None:
     return token if token.startswith("eyJ") else None
 
 
-def _normalize_cookie(raw: object, index: int) -> dict[str, object]:
-    if not isinstance(raw, dict):
-        raise PlaywrightRefreshError(f"Cookie entry {index} must be a JSON object.")
+def _credentials_available(settings: Settings) -> bool:
+    return bool(settings.login_email and settings.login_password and settings.login_totp_secret)
 
-    name = raw.get("name")
-    value = raw.get("value")
-    if not isinstance(name, str) or not name:
-        raise PlaywrightRefreshError(f"Cookie entry {index} is missing a valid name.")
-    if not isinstance(value, str):
-        raise PlaywrightRefreshError(f"Cookie entry {index} is missing a valid value.")
 
-    cookie: dict[str, object] = {
-        "name": name,
-        "value": value,
-    }
-
-    url = raw.get("url")
-    domain = raw.get("domain")
-    path = raw.get("path")
-    if isinstance(url, str) and url:
-        cookie["url"] = url
-    elif isinstance(domain, str) and domain:
-        cookie["domain"] = domain
-        cookie["path"] = path if isinstance(path, str) and path else "/"
-    else:
-        raise PlaywrightRefreshError(
-            f"Cookie entry {index} must include either url or domain."
+def _body_mentions_totp(body_text: str) -> bool:
+    normalized = body_text.lower()
+    return any(
+        phrase in normalized
+        for phrase in (
+            "enter code",
+            "verification code",
+            "authenticator app",
+            "one-time password",
+            "totp",
         )
-
-    expires = raw.get("expires", raw.get("expirationDate"))
-    if expires not in (None, "", -1):
-        if not isinstance(expires, (int, float)):
-            raise PlaywrightRefreshError(f"Cookie entry {index} has an invalid expires value.")
-        cookie["expires"] = float(expires)
-
-    for field in ("httpOnly", "secure"):
-        value = raw.get(field)
-        if isinstance(value, bool):
-            cookie[field] = value
-
-    same_site = raw.get("sameSite")
-    if isinstance(same_site, str):
-        normalized_same_site = {
-            "strict": "Strict",
-            "lax": "Lax",
-            "none": "None",
-            "no_restriction": "None",
-        }.get(same_site.strip().lower())
-        if normalized_same_site:
-            cookie["sameSite"] = normalized_same_site
-
-    return cookie
+    )
 
 
-def load_cookies(cookies_path: str | Path) -> list[dict[str, object]]:
-    path = Path(cookies_path)
+def _generate_totp_code(secret: str) -> str:
     try:
-        payload = json.loads(path.read_text(encoding="utf-8"))
-    except FileNotFoundError as exc:
-        raise PlaywrightRefreshError(f"Cookie file not found: {path}") from exc
-    except json.JSONDecodeError as exc:
-        raise PlaywrightRefreshError(f"Cookie file is not valid JSON: {path}") from exc
-
-    if isinstance(payload, dict):
-        payload = payload.get("cookies")
-
-    if not isinstance(payload, list) or not payload:
+        import pyotp
+    except ImportError as exc:
         raise PlaywrightRefreshError(
-            "Cookie file must contain a non-empty JSON array, or an object with a non-empty "
-            "`cookies` array."
+            "pyotp is not installed. Install the refresh extra before using TOTP-based login."
+        ) from exc
+
+    normalized_secret = "".join(secret.split())
+    return pyotp.TOTP(normalized_secret).now()
+
+
+async def _fill_first_available(page, selectors: tuple[str, ...], value: str) -> bool:
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() <= 0:
+                continue
+            await locator.click(timeout=1_000)
+            await locator.fill(value)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def _click_first_available(page, selectors: tuple[str, ...], *, timeout_ms: int = 5_000) -> bool:
+    for selector in selectors:
+        try:
+            locator = page.locator(selector).first
+            if await locator.count() <= 0:
+                continue
+            await locator.click(timeout=timeout_ms)
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def _nudge_chatbox(page) -> bool:
+    for selector in _CHATBOX_SELECTORS:
+        try:
+            locator = page.locator(selector).first
+            await locator.click(timeout=1_000)
+            await locator.press_sequentially("x", delay=50)
+            await locator.press("Backspace")
+            return True
+        except Exception:
+            continue
+    return False
+
+
+async def _advance_login_flow(
+    page,
+    settings: Settings,
+    *,
+    allow_manual_reauth: bool = False,
+) -> None:
+    if "login.microsoftonline.com" not in page.url:
+        return
+
+    if _credentials_available(settings):
+        if await _click_first_available(page, (_USE_ANOTHER_ACCOUNT_SELECTOR,), timeout_ms=2_000):
+            await page.wait_for_timeout(2_000)
+            return
+
+        if await _fill_first_available(page, (_EMAIL_SELECTOR,), settings.login_email or ""):
+            if await _click_first_available(page, (_SUBMIT_SELECTOR,)):
+                await page.wait_for_timeout(2_000)
+                return
+
+        if await _fill_first_available(page, (_PASSWORD_SELECTOR,), settings.login_password or ""):
+            if await _click_first_available(page, (_SUBMIT_SELECTOR,)):
+                await page.wait_for_timeout(2_000)
+                return
+
+    try:
+        account_tiles = page.locator(_ACCOUNT_TILE_SELECTOR)
+        if await account_tiles.count() > 0:
+            await account_tiles.first.click(timeout=5_000)
+            await page.wait_for_timeout(2_000)
+            return
+    except Exception:
+        pass
+
+    if "login.microsoftonline.com" not in page.url:
+        return
+
+    try:
+        body_text = await page.locator("body").inner_text()
+    except Exception:
+        body_text = ""
+
+    if _credentials_available(settings) and _body_mentions_totp(body_text):
+        code = _generate_totp_code(settings.login_totp_secret or "")
+        if await _fill_first_available(page, _TOTP_SELECTORS, code):
+            if await _click_first_available(page, _TOTP_CONTINUE_SELECTORS):
+                await page.wait_for_timeout(2_000)
+                return
+
+    if "stay signed in" in body_text.lower():
+        if await _click_first_available(page, (_SUBMIT_SELECTOR,)):
+            await page.wait_for_timeout(2_000)
+            return
+
+    if "Enter password" in body_text:
+        if allow_manual_reauth:
+            return
+        if _credentials_available(settings):
+            raise PlaywrightRefreshError(
+                "Credential-based login could not advance past the Microsoft password prompt."
+            )
+        raise PlaywrightRefreshError(
+            "Saved Playwright profile needs interactive reauthentication: "
+            "Microsoft is prompting for the account password."
         )
 
-    return [_normalize_cookie(cookie, index) for index, cookie in enumerate(payload, start=1)]
-
+    if _body_mentions_totp(body_text):
+        if allow_manual_reauth:
+            return
+        raise PlaywrightRefreshError(
+            "Credential-based login reached the Microsoft verification-code step, but the TOTP "
+            "input could not be completed automatically."
+        )
 
 async def _launch_persistent_context(
     settings: Settings,
@@ -161,52 +249,12 @@ async def _launch_persistent_context(
     return manager, context
 
 
-async def import_cookies_with_playwright(
-    settings: Settings,
-    cookies_path: str | Path,
-    *,
-    headed: bool = False,
-) -> int:
-    cookies = load_cookies(cookies_path)
-    manager, context = await _launch_persistent_context(settings, headed=headed)
-    try:
-        await context.add_cookies(cookies)
-    except Exception as exc:
-        raise PlaywrightRefreshError(f"Playwright cookie import failed: {exc}") from exc
-    finally:
-        await context.close()
-        await manager.__aexit__(None, None, None)
-
-    return len(cookies)
-
-
-async def export_cookies_with_playwright(
-    settings: Settings,
-    output_path: str | Path,
-    *,
-    headed: bool = False,
-) -> tuple[Path, int]:
-    path = Path(output_path)
-    manager, context = await _launch_persistent_context(settings, headed=headed)
-    try:
-        cookies = await context.cookies()
-    except Exception as exc:
-        raise PlaywrightRefreshError(f"Playwright cookie export failed: {exc}") from exc
-    finally:
-        await context.close()
-        await manager.__aexit__(None, None, None)
-
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(cookies, indent=2) + "\n", encoding="utf-8")
-    return path, len(cookies)
-
-
 async def _capture_token(
     settings: Settings,
     headed: bool,
     timeout_seconds: int,
     *,
-    initial_cookies: list[dict[str, object]] | None = None,
+    allow_manual_reauth: bool = False,
 ) -> str:
     token_event = asyncio.Event()
     token_box: dict[str, str | None] = {"value": None}
@@ -224,9 +272,6 @@ async def _capture_token(
     try:
         manager, context = await _launch_persistent_context(settings, headed=headed)
         try:
-            if initial_cookies:
-                await context.add_cookies(initial_cookies)
-
             pages = list(context.pages)
             if not pages:
                 pages = [await context.new_page()]
@@ -239,13 +284,23 @@ async def _capture_token(
             await page.goto(settings.login_url, wait_until="domcontentloaded")
 
             deadline = time.time() + timeout_seconds
+            next_chatbox_nudge = time.time()
             while time.time() < deadline:
+                await _advance_login_flow(
+                    page,
+                    settings,
+                    allow_manual_reauth=allow_manual_reauth,
+                )
                 if token_box["value"]:
                     return token_box["value"]
                 with contextlib.suppress(Exception):
                     set_token(await page.evaluate(_STORAGE_JS))
                 if token_box["value"]:
                     return token_box["value"]
+                if time.time() >= next_chatbox_nudge:
+                    with contextlib.suppress(Exception):
+                        await _nudge_chatbox(page)
+                    next_chatbox_nudge = time.time() + 5
                 remaining = deadline - time.time()
                 if remaining <= 0:
                     break
@@ -272,14 +327,12 @@ async def login_with_playwright(
     timeout_seconds: int = 600,
     *,
     headed: bool = True,
-    cookies_path: str | Path | None = None,
 ) -> Path:
-    initial_cookies = load_cookies(cookies_path) if cookies_path else None
     token = await _capture_token(
         settings,
         headed=headed,
         timeout_seconds=timeout_seconds,
-        initial_cookies=initial_cookies,
+        allow_manual_reauth=headed,
     )
     return write_access_token(settings, token)
 
@@ -295,19 +348,29 @@ async def refresh_token_with_playwright(
 
 
 async def run_refresh_daemon(settings: Settings) -> None:
+    startup_refresh_done = False
     while True:
         try:
             try:
                 token = load_access_token(settings)
             except TokenStoreError:
-                path = await refresh_token_with_playwright(settings)
-                print(f"Created token at {path}.")
-                token = load_access_token(settings)
+                token = None
 
-            if token_needs_refresh(token, settings.token_refresh_buffer_seconds):
-                path = await refresh_token_with_playwright(settings)
-                print(f"Refreshed token at {path}.")
+            if (
+                not startup_refresh_done
+                or token is None
+                or token_needs_refresh(token, settings.token_refresh_buffer_seconds)
+            ):
+                path = await refresh_token_with_playwright(
+                    settings,
+                    timeout_seconds=settings.token_capture_timeout_seconds,
+                )
+                if token is None:
+                    print(f"Created token at {path}.")
+                else:
+                    print(f"Refreshed token at {path}.")
                 token = load_access_token(settings)
+                startup_refresh_done = True
 
             delay = max(
                 5,

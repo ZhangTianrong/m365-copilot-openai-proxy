@@ -12,8 +12,6 @@ from .app import create_app
 from .config import Settings
 from .playwright_refresh import (
     PlaywrightRefreshError,
-    export_cookies_with_playwright,
-    import_cookies_with_playwright,
     login_with_playwright,
     refresh_token_with_playwright,
     run_refresh_daemon,
@@ -35,20 +33,9 @@ def main() -> None:
     subparsers.add_parser("set-token").set_defaults(func=set_token_command)
 
     login_parser = subparsers.add_parser("login")
-    login_parser.add_argument("--cookies", dest="cookies_path")
     login_parser.add_argument("--headless", action="store_true")
     login_parser.add_argument("--timeout", type=int, default=600)
     login_parser.set_defaults(func=login_command)
-
-    import_cookies_parser = subparsers.add_parser("import-cookies")
-    import_cookies_parser.add_argument("cookies_path")
-    import_cookies_parser.add_argument("--headed", action="store_true")
-    import_cookies_parser.set_defaults(func=import_cookies_command)
-
-    export_cookies_parser = subparsers.add_parser("export-cookies")
-    export_cookies_parser.add_argument("output_path")
-    export_cookies_parser.add_argument("--headed", action="store_true")
-    export_cookies_parser.set_defaults(func=export_cookies_command)
 
     refresh_parser = subparsers.add_parser("refresh-token")
     refresh_parser.add_argument("--headed", action="store_true")
@@ -81,11 +68,20 @@ def set_token_command(_args: argparse.Namespace) -> None:
 
 def login_command(args: argparse.Namespace) -> None:
     settings = Settings()
-    if args.cookies_path:
-        mode = "headless" if args.headless else "headed"
+    if (
+        args.headless
+        and settings.login_email
+        and settings.login_password
+        and settings.login_totp_secret
+    ):
         print(
-            f"Launching a persistent Playwright browser profile in {mode} mode, importing cookies "
-            f"from {args.cookies_path}, and waiting for the Copilot token."
+            "Launching a persistent Playwright browser profile in headless mode and attempting "
+            "Microsoft 365 sign-in with the configured credential and TOTP environment variables."
+        )
+    elif args.headless:
+        print(
+            "Launching a persistent Playwright browser profile in headless mode and waiting for "
+            "the existing browser profile or session to yield a Copilot token."
         )
     else:
         print(
@@ -98,45 +94,12 @@ def login_command(args: argparse.Namespace) -> None:
                 settings,
                 timeout_seconds=args.timeout,
                 headed=not args.headless,
-                cookies_path=args.cookies_path,
             )
         )
     except PlaywrightRefreshError as exc:
         print(f"Login failed: {exc}")
         raise SystemExit(1) from exc
     print(f"Token saved to {path}.")
-
-
-def import_cookies_command(args: argparse.Namespace) -> None:
-    settings = Settings()
-    try:
-        count = asyncio.run(
-            import_cookies_with_playwright(
-                settings,
-                args.cookies_path,
-                headed=args.headed,
-            )
-        )
-    except PlaywrightRefreshError as exc:
-        print(f"Cookie import failed: {exc}")
-        raise SystemExit(1) from exc
-    print(f"Imported {count} cookies into {settings.profile_dir}.")
-
-
-def export_cookies_command(args: argparse.Namespace) -> None:
-    settings = Settings()
-    try:
-        path, count = asyncio.run(
-            export_cookies_with_playwright(
-                settings,
-                args.output_path,
-                headed=args.headed,
-            )
-        )
-    except PlaywrightRefreshError as exc:
-        print(f"Cookie export failed: {exc}")
-        raise SystemExit(1) from exc
-    print(f"Exported {count} cookies from {settings.profile_dir} to {path}.")
 
 
 def refresh_token_command(args: argparse.Namespace) -> None:

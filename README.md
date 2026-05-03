@@ -24,11 +24,11 @@ The proxy connects to `substrate.office.com` — the same WebSocket API the M365
 
 ## Multimodal Status
 
-- OpenAI Chat Completions and OpenAI Responses accept `data:image/...;base64,...` image parts in the final user message.
+- OpenAI Chat Completions and OpenAI Responses accept `data:image/...;base64,...` image parts in user messages.
 - Those images are uploaded to Copilot and forwarded as image attachments on the proxied request.
+- Because each API call still becomes one fresh Copilot turn, earlier user-message images are replayed into that turn and referenced in the reconstructed plain-text transcript as `[Image N]`.
 - Non-image attachments, remote image URLs, and unsupported image shapes are ignored instead of failing the whole request.
 - Anthropic-style requests stay text-only for now. Any attachment parts are dropped.
-- Earlier user-message images are not preserved across turns yet because the proxy still rebuilds each request as a fresh Copilot conversation.
 
 ---
 
@@ -48,18 +48,7 @@ uv run copilot-openai-proxy login
 
 This creates a persistent Playwright browser profile under `.state/profile`, waits for the Copilot page to authenticate, and saves the current token to `.state/access_token.txt`.
 
-If you already have cookies exported from a logged-in Copilot browser session, you can bootstrap the persistent Playwright profile without a manual sign-in:
-
-```powershell
-uv run copilot-openai-proxy login --cookies cookies.json --headless
-```
-
-The cookie file must be JSON in either of these shapes:
-
-- a top-level array of cookie objects
-- an object with a top-level `cookies` array, such as a Playwright storage-state export
-
-Cookie objects must include `name`, `value`, and either `url` or `domain`.
+If `M365_LOGIN_EMAIL`, `M365_LOGIN_PASSWORD`, and `M365_LOGIN_TOTP_SECRET` are set, the Playwright login flow will first try a fully headless Microsoft sign-in using those credentials and the current TOTP code.
 
 ### 3. Start the refresher
 
@@ -96,6 +85,25 @@ docker compose up -d --build
 - `api` serves the OpenAI-compatible HTTP API.
 - `token-refresher` runs the Playwright refresh daemon and persists its browser profile in `./state/profile`.
 
+For a fully headless first login, set these environment variables for the `token-refresher` service through your shell or `.env` file before running Compose:
+
+```bash
+M365_LOGIN_EMAIL=...
+M365_LOGIN_PASSWORD=...
+M365_LOGIN_TOTP_SECRET=...
+M365_TOKEN_CAPTURE_TIMEOUT_SECONDS=600
+```
+
+`docker compose up` does not accept `-e` the way `docker compose run` does. Use shell-prefixed environment variables or a `.env` file instead:
+
+```bash
+M365_LOGIN_EMAIL=... \
+M365_LOGIN_PASSWORD=... \
+M365_LOGIN_TOTP_SECRET=... \
+M365_TOKEN_CAPTURE_TIMEOUT_SECONDS=600 \
+docker compose up -d --build
+```
+
 For the first login, run a one-shot interactive browser session against the same shared volume. On an Ubuntu X11 desktop session, authorize the container's `root` user first:
 
 ```bash
@@ -111,40 +119,24 @@ docker compose run --rm \
   -v /tmp/.X11-unix:/tmp/.X11-unix \
   -v /run/user/1000/gdm/Xauthority:/run/user/1000/gdm/Xauthority:ro \
   token-refresher \
-  copilot-openai-proxy login
+  copilot-openai-proxy login --timeout 1800
 ```
 
 If your desktop session uses a different Xauthority path, substitute the correct host path.
 
-After the Copilot page finishes loading, the token is usually captured automatically. If the command does not exit after sign-in, click into the Copilot chat box and type a character to trigger the WebSocket request that carries the token. You do not need to submit the message.
+`docker compose up -d` runs the headless `refresh-daemon`. It is appropriate for automatic credential-based bootstrap, but it is not the command to use if you want to manually try alternate sign-in choices or observe whether Microsoft shows a "Stay signed in" prompt. For that, use the headed `copilot-openai-proxy login` command above.
+
+After the Copilot page finishes loading, the login and refresh flow now tries to trigger token capture automatically by:
+
+- submitting the Microsoft email, password, and TOTP steps when those env vars are configured
+- clicking the remembered Microsoft account tile if the profile lands on the account picker
+- focusing the Copilot chat box, typing a character, and deleting it without submitting
+
+If a headed login still does not exit after sign-in, click into the chat box and type a character manually as a fallback.
+
+If the saved profile lands on `Enter password` and no credential env vars are set, Microsoft is requiring interactive reauthentication and the headless refresher cannot complete that step by itself.
 
 Once `Token saved to /data/access_token.txt.` is printed and the command exits, `docker compose up -d` is enough for normal headless operation.
-
-After a successful headed login, you can snapshot the authenticated Playwright profile's cookies for later cookie-only bootstrap tests:
-
-```bash
-docker compose run --rm \
-  token-refresher \
-  copilot-openai-proxy export-cookies /data/cookies.json
-```
-
-If you already have exported cookies, you can seed the shared Playwright profile first:
-
-```bash
-docker compose run --rm \
-  token-refresher \
-  copilot-openai-proxy import-cookies /data/cookies.json
-```
-
-Then either run a headless token bootstrap:
-
-```bash
-docker compose run --rm \
-  token-refresher \
-  copilot-openai-proxy login --cookies /data/cookies.json --headless
-```
-
-Or start the normal daemon and let it refresh from the seeded profile.
 
 ---
 
@@ -261,6 +253,7 @@ $r.content[0].text
 | `M365_PROFILE_DIR` | `.state/profile` | Persistent Playwright browser profile |
 | `M365_LOGIN_URL` | `https://m365.cloud.microsoft/chat` | Page the refresher opens to obtain a token |
 | `M365_BROWSER_CHANNEL` | unset | Optional Playwright browser channel such as `msedge` |
+| `M365_TOKEN_CAPTURE_TIMEOUT_SECONDS` | `600` | How long login or daemon refresh attempts wait for Copilot token capture |
 | `M365_TOKEN_REFRESH_BUFFER_SECONDS` | `300` | Refresh token this many seconds before expiry |
 | `M365_TOKEN_REFRESH_RETRY_SECONDS` | `30` | Retry delay after refresh failures |
 | `M365_TIME_ZONE` | `Asia/Tokyo` | Time zone sent with each request |

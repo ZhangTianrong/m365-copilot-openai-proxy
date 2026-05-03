@@ -8,12 +8,10 @@ This repository now includes a minimal Playwright refresher designed for Ubuntu 
 
 - `copilot-openai-proxy login`
   Creates a persistent browser profile, opens the Copilot page in headed mode, and saves the first token to `M365_ACCESS_TOKEN_FILE`.
-- `copilot-openai-proxy login --cookies cookies.json --headless`
-  Imports cookies from an existing browser session into the persistent profile and tries to bootstrap the first token without a manual GUI login.
-- `copilot-openai-proxy import-cookies cookies.json`
-  Seeds the persistent Playwright profile from a cookie export without immediately requesting a token.
+- `copilot-openai-proxy login` with `M365_LOGIN_EMAIL`, `M365_LOGIN_PASSWORD`, and `M365_LOGIN_TOTP_SECRET`
+  Attempts a fully headless Microsoft sign-in first, then captures the Copilot token once the browser reaches the chat UI.
 - `copilot-openai-proxy refresh-token`
-  Reuses that profile for a one-shot refresh.
+  Reuses that profile for a one-shot refresh, clicks the remembered Microsoft account tile when the profile lands on the account picker, and then nudges the Copilot chat input to provoke the token-bearing request.
 - `copilot-openai-proxy refresh-daemon`
   Runs headless, refreshes before expiry, and updates the shared token file in place.
 - `copilot-openai-proxy serve`
@@ -33,8 +31,9 @@ This is the preferred path for Linux and Docker deployments.
 How it works:
 
 1. Do a one-time interactive sign-in with `copilot-openai-proxy login`.
+   Or configure the credential env vars and let the refresher attempt headless email/password/TOTP sign-in first.
 2. Persist the browser profile directory.
-3. Run `copilot-openai-proxy refresh-daemon` headlessly.
+3. Run `copilot-openai-proxy refresh-daemon` headlessly. The refresher will click the remembered account tile if needed, then focus the Copilot input and type-then-delete a character while waiting for the next token capture.
 4. Share the token file with the API service.
 
 Why this is the right default:
@@ -47,8 +46,8 @@ Why this is the right default:
 Tradeoffs:
 
 - requires Playwright and a browser runtime
-- the default first login flow still needs a headed browser session
-- cookie bootstrap can avoid the first headed login, but only if the exported cookies are still valid and tenant policies do not force an interactive challenge
+- fully headless first login is possible only when Microsoft accepts the browser flow with email, password, and TOTP alone
+- Microsoft may still require interactive reauthentication later; if the saved profile reaches an `Enter password` prompt, headless refresh stops there
 
 ---
 
