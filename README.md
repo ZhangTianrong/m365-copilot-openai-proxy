@@ -88,6 +88,20 @@ When enabled, the proxy:
 
 The local cache is stored in SQLite and only tracks the latest checkpoint for each Copilot conversation.
 
+### 6. Optional debug logging
+
+Verbose proxy logging is off by default. To log sanitized request bodies, translated prompts, and conversation reuse routing decisions:
+
+```bash
+M365_DEBUG_LOGGING=true
+```
+
+With Docker Compose, set it in `.env` and inspect the API logs with:
+
+```bash
+docker compose logs -f api
+```
+
 ---
 
 ## Docker Compose
@@ -267,6 +281,7 @@ $r.content[0].text
 | `M365_ACCESS_TOKEN` | unset | Fallback bearer token when no token file exists |
 | `M365_ACCESS_TOKEN_FILE` | `.state/access_token.txt` | Shared token file used by the API and refresher |
 | `M365_PROFILE_DIR` | `.state/profile` | Persistent Playwright browser profile |
+| `M365_DEBUG_LOGGING` | `false` | Emit sanitized proxy request, translation, and routing logs |
 | `M365_ENABLE_CONVERSATION_REUSE` | `false` | Reuse the latest matching Copilot conversation from the local history DB |
 | `M365_CONVERSATION_DB_PATH` | `.state/conversation_reuse.db` | SQLite database for conversation reuse state |
 | `M365_CONVERSATION_MAX_CONVERSATIONS` | `500` | Maximum number of cached conversation rows before LRU eviction |

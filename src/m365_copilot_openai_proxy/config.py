@@ -14,6 +14,7 @@ class Settings(BaseSettings):
     access_token: str | None = Field(default=None, alias="M365_ACCESS_TOKEN")
     access_token_file: str = Field(default=".state/access_token.txt", alias="M365_ACCESS_TOKEN_FILE")
     profile_dir: str = Field(default=".state/profile", alias="M365_PROFILE_DIR")
+    debug_logging: bool = Field(default=False, alias="M365_DEBUG_LOGGING")
     enable_conversation_reuse: bool = Field(default=False, alias="M365_ENABLE_CONVERSATION_REUSE")
     conversation_db_path: str = Field(
         default=".state/conversation_reuse.db",

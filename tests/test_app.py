@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+import logging
 
 from fastapi.testclient import TestClient
 
@@ -68,10 +69,12 @@ def build_client(
     tmp_path,
     *,
     enable_reuse: bool = False,
+    debug_logging: bool = False,
 ) -> TestClient:
     settings = Settings(
         _env_file=None,
         M365_ACCESS_TOKEN="fake-token",
+        M365_DEBUG_LOGGING=debug_logging,
         M365_ENABLE_CONVERSATION_REUSE=enable_reuse,
         M365_CONVERSATION_DB_PATH=str(tmp_path / "conversation_reuse.db"),
     )
@@ -410,6 +413,72 @@ def test_reuse_enabled_reuses_latest_history_key_for_same_user(tmp_path) -> None
     assert second_call["is_start_of_session"] is False
     assert second_call["prompt"] == "Follow up"
     assert second_call["additional_context"] == []
+
+
+def test_debug_logging_reports_request_and_sanitized_images(tmp_path, caplog) -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake, tmp_path, debug_logging=True)
+    with caplog.at_level(logging.INFO, logger="m365_copilot_openai_proxy.app"):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "ignored",
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "text", "text": "Describe this"},
+                            {"type": "image_url", "image_url": {"url": "data:image/png;base64,aGVsbG8="}},
+                        ],
+                    }
+                ],
+            },
+        )
+    assert response.status_code == 200
+    log_text = "\n".join(caplog.messages)
+    assert '"event": "request.received"' in log_text
+    assert '"messages"' in log_text
+    assert '"type": "data_url_image"' in log_text
+    assert '"event": "turn.prepared"' in log_text
+    assert '"routing_mode": "stateless_disabled"' in log_text
+
+
+def test_debug_logging_reports_reuse_hits(tmp_path, caplog) -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake, tmp_path, enable_reuse=True, debug_logging=True)
+    client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {"role": "user", "content": "Earlier"},
+                {"role": "assistant", "content": "Reply"},
+                {"role": "user", "content": "Next"},
+            ],
+            "user": "alice",
+        },
+    )
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="m365_copilot_openai_proxy.app"):
+        response = client.post(
+            "/v1/chat/completions",
+            json={
+                "model": "ignored",
+                "messages": [
+                    {"role": "user", "content": "Earlier"},
+                    {"role": "assistant", "content": "Reply"},
+                    {"role": "user", "content": "Next"},
+                    {"role": "assistant", "content": "copilot reply"},
+                    {"role": "user", "content": "Follow up"},
+                ],
+                "user": "alice",
+            },
+        )
+    assert response.status_code == 200
+    log_text = "\n".join(caplog.messages)
+    assert '"event": "turn.prepared"' in log_text
+    assert '"routing_mode": "reused"' in log_text
+    assert '"is_start_of_session": false' in log_text
 
 
 def test_reuse_enabled_branches_via_stateless_fallback_when_latest_key_no_longer_matches(tmp_path) -> None:
