@@ -9,13 +9,13 @@ from urllib.parse import quote
 import httpx
 import websockets
 
+from .copilot_models import CopilotModelTransport
 from .models import TranslatedImage, UploadedImage
 from .token_store import decode_jwt_payload
 
 SIGNALR_SEP = "\x1e"
 _WS_BASE = "wss://substrate.office.com/m365Copilot/Chathub"
 _UPLOAD_URL = "https://substrate.office.com/m365Copilot/UploadFile"
-
 _VARIANTS = (
     "EnableMcpServerWidgets,feature.EnableMcpServerWidgets,feature.EnableLuForChatCIQ,"
     "feature.enableChatCIQPlugin,EnableRequestPlugins,feature.EnableSensitivityLabels,"
@@ -94,9 +94,16 @@ class SubstrateCopilotError(RuntimeError):
     pass
 
 class SubstrateCopilotClient:
-    def __init__(self, access_token: str, time_zone: str = "Asia/Tokyo"):
+    def __init__(
+        self,
+        access_token: str,
+        time_zone: str = "Asia/Tokyo",
+        *,
+        model_transport: CopilotModelTransport | None = None,
+    ):
         self._token = access_token
         self._time_zone = time_zone
+        self._model_transport = model_transport
         try:
             claims = decode_jwt_payload(access_token)
         except Exception as exc:
@@ -129,7 +136,14 @@ class SubstrateCopilotClient:
         session_id: str,
         req_id: str,
         uploaded_images: list[UploadedImage],
+        *,
+        is_start_of_session: bool,
     ) -> str:
+        thread_level_gpt_id = {}
+        tone = None
+        if self._model_transport is not None:
+            thread_level_gpt_id = dict(self._model_transport.thread_level_gpt_id)
+            tone = self._model_transport.tone
         payload = {
             "arguments": [{
                 "source": "officeweb",
@@ -142,9 +156,9 @@ class SubstrateCopilotClient:
                 "extraExtensionParameters": {},
                 "allowedMessageTypes": _ALLOWED_MESSAGE_TYPES,
                 "sliceIds": [],
-                "threadLevelGptId": {},
+                "threadLevelGptId": thread_level_gpt_id,
                 "traceId": req_id,
-                "isStartOfSession": True,
+                "isStartOfSession": is_start_of_session,
                 "clientInfo": {
                     "clientPlatform": "mcmcopilot-web",
                     "clientAppName": "Office",
@@ -184,7 +198,6 @@ class SubstrateCopilotClient:
                 },
                 "plugins": [{"Id": "BingWebSearch", "Source": "BuiltIn"}],
                 "isSbsSupported": True,
-                "tone": "Magic",
                 "renderReferencesBehindEOS": True,
                 "disconnectBehavior": "continue",
             }],
@@ -192,6 +205,8 @@ class SubstrateCopilotClient:
             "target": "chat",
             "type": 4,
         }
+        if tone:
+            payload["arguments"][0]["tone"] = tone
         return json.dumps(payload, ensure_ascii=False) + SIGNALR_SEP
 
     async def _upload_image(
@@ -255,9 +270,12 @@ class SubstrateCopilotClient:
         prompt: str,
         additional_context: list[str],
         images: list[TranslatedImage] | None = None,
+        *,
+        conversation_id: str,
+        is_start_of_session: bool,
     ) -> AsyncIterator[str]:
         text = _combine_text(prompt, additional_context)
-        conv_id = str(uuid.uuid4())
+        conv_id = conversation_id
         session_id = str(uuid.uuid4())
         req_id = str(uuid.uuid4())
         url = self._ws_url(conv_id, session_id, req_id)
@@ -271,7 +289,16 @@ class SubstrateCopilotClient:
             ) as ws:
                 await ws.send(json.dumps({"protocol": "json", "version": 1}) + SIGNALR_SEP)
                 await ws.recv()
-                await ws.send(self._chat_invoke(text, conv_id, session_id, req_id, uploaded_images))
+                await ws.send(
+                    self._chat_invoke(
+                        text,
+                        conv_id,
+                        session_id,
+                        req_id,
+                        uploaded_images,
+                        is_start_of_session=is_start_of_session,
+                    )
+                )
                 fallback_text = ""
                 yielded_any = False
                 async for raw in ws:
@@ -321,9 +348,18 @@ class SubstrateCopilotClient:
         prompt: str,
         additional_context: list[str],
         images: list[TranslatedImage] | None = None,
+        *,
+        conversation_id: str,
+        is_start_of_session: bool,
     ) -> str:
         chunks: list[str] = []
-        async for chunk in self.chat_stream(prompt, additional_context, images):
+        async for chunk in self.chat_stream(
+            prompt,
+            additional_context,
+            images,
+            conversation_id=conversation_id,
+            is_start_of_session=is_start_of_session,
+        ):
             chunks.append(chunk)
         return "".join(chunks)
 

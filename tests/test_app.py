@@ -70,6 +70,7 @@ def build_client(
     *,
     enable_reuse: bool = False,
     debug_logging: bool = False,
+    copilot_model_name: str | None = None,
 ) -> TestClient:
     settings = Settings(
         _env_file=None,
@@ -77,6 +78,7 @@ def build_client(
         M365_DEBUG_LOGGING=debug_logging,
         M365_ENABLE_CONVERSATION_REUSE=enable_reuse,
         M365_CONVERSATION_DB_PATH=str(tmp_path / "conversation_reuse.db"),
+        M365_COPILOT_MODEL_NAME=copilot_model_name,
     )
     app = create_app(settings=settings, copilot_client_factory=lambda: fake)
     return TestClient(app)
@@ -88,6 +90,62 @@ def test_models_endpoint(tmp_path) -> None:
     assert response.status_code == 200
     body = response.json()
     assert body["data"][0]["id"] == "m365-copilot"
+
+
+def test_models_endpoint_stays_model_alias_when_copilot_model_selected(tmp_path) -> None:
+    client = build_client(
+        FakeCopilotClient(),
+        tmp_path,
+        copilot_model_name="GPT 5.4 Think Deeper",
+    )
+    response = client.get("/v1/models")
+    assert response.status_code == 200
+    body = response.json()
+    assert body["data"][0]["id"] == "m365-copilot"
+
+
+def test_conversation_reuse_is_unchanged_by_selected_copilot_model(tmp_path) -> None:
+    fake = FakeCopilotClient()
+    client = build_client(
+        fake,
+        tmp_path,
+        enable_reuse=True,
+        copilot_model_name="GPT 5.4 Think Deeper",
+    )
+
+    first = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {"role": "user", "content": "Earlier"},
+                {"role": "assistant", "content": "Reply"},
+                {"role": "user", "content": "Next"},
+            ],
+            "user": "alice",
+        },
+    )
+    assert first.status_code == 200
+    first_call = fake.calls[0]
+
+    second = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {"role": "user", "content": "Earlier"},
+                {"role": "assistant", "content": "Reply"},
+                {"role": "user", "content": "Next"},
+                {"role": "assistant", "content": "copilot reply"},
+                {"role": "user", "content": "Follow up"},
+            ],
+            "user": "alice",
+        },
+    )
+    assert second.status_code == 200
+    second_call = fake.calls[1]
+    assert second_call["conversation_id"] == first_call["conversation_id"]
+    assert second_call["is_start_of_session"] is False
 
 
 def test_openai_chat_completion_translates_history(tmp_path) -> None:
@@ -479,6 +537,24 @@ def test_debug_logging_reports_reuse_hits(tmp_path, caplog) -> None:
     assert '"event": "turn.prepared"' in log_text
     assert '"routing_mode": "reused"' in log_text
     assert '"is_start_of_session": false' in log_text
+
+
+def test_invalid_copilot_model_name_warns_and_falls_back(tmp_path, caplog) -> None:
+    fake = FakeCopilotClient()
+    with caplog.at_level(logging.WARNING, logger="m365_copilot_openai_proxy.app"):
+        build_client(
+            fake,
+            tmp_path,
+            debug_logging=False,
+        )
+        settings = Settings(
+            _env_file=None,
+            M365_ACCESS_TOKEN="fake-token",
+            M365_COPILOT_MODEL_NAME="gpt 5.5 think deeper",
+            M365_CONVERSATION_DB_PATH=str(tmp_path / "conversation_reuse.db"),
+        )
+        create_app(settings=settings, copilot_client_factory=lambda: fake)
+    assert "validated transport mapping yet" in "\n".join(caplog.messages)
 
 
 def test_reuse_enabled_branches_via_stateless_fallback_when_latest_key_no_longer_matches(tmp_path) -> None:

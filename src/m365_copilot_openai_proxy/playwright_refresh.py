@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import re
 import time
+from dataclasses import dataclass
 from pathlib import Path
 
 from .config import Settings
@@ -58,6 +59,11 @@ _TOTP_CONTINUE_SELECTORS = (
 
 class PlaywrightRefreshError(RuntimeError):
     pass
+
+
+@dataclass(slots=True)
+class AuthenticatedSessionState:
+    saw_login_host: bool = False
 
 
 def _import_playwright():
@@ -256,8 +262,33 @@ async def _capture_token(
     *,
     allow_manual_reauth: bool = False,
 ) -> str:
+    manager = None
+    context = None
+    try:
+        manager, context, _page, token, _auth_state = await open_authenticated_context(
+            settings,
+            headed=headed,
+            timeout_seconds=timeout_seconds,
+            allow_manual_reauth=allow_manual_reauth,
+        )
+        return token
+    finally:
+        if context is not None:
+            await context.close()
+        if manager is not None:
+            await manager.__aexit__(None, None, None)
+
+
+async def open_authenticated_context(
+    settings: Settings,
+    *,
+    headed: bool,
+    timeout_seconds: int,
+    allow_manual_reauth: bool = False,
+):
     token_event = asyncio.Event()
     token_box: dict[str, str | None] = {"value": None}
+    auth_state = AuthenticatedSessionState()
 
     def set_token(raw: str | None) -> None:
         token = _extract_token(raw)
@@ -271,55 +302,79 @@ async def _capture_token(
 
     try:
         manager, context = await _launch_persistent_context(settings, headed=headed)
-        try:
-            pages = list(context.pages)
-            if not pages:
-                pages = [await context.new_page()]
+        pages = list(context.pages)
+        if not pages:
+            pages = [await context.new_page()]
 
-            for page in pages:
-                attach_listeners(page)
+        for page in pages:
+            attach_listeners(page)
 
-            context.on("page", attach_listeners)
-            page = pages[0]
-            await page.goto(settings.login_url, wait_until="domcontentloaded")
+        context.on("page", attach_listeners)
+        page = pages[0]
+        await page.goto(settings.login_url, wait_until="domcontentloaded")
 
-            deadline = time.time() + timeout_seconds
-            next_chatbox_nudge = time.time()
-            while time.time() < deadline:
-                await _advance_login_flow(
-                    page,
-                    settings,
-                    allow_manual_reauth=allow_manual_reauth,
-                )
-                if token_box["value"]:
-                    return token_box["value"]
+        deadline = time.time() + timeout_seconds
+        next_chatbox_nudge = time.time()
+        while time.time() < deadline:
+            if "login.microsoftonline.com" in page.url:
+                auth_state.saw_login_host = True
+            await _advance_login_flow(
+                page,
+                settings,
+                allow_manual_reauth=allow_manual_reauth,
+            )
+            if token_box["value"]:
+                return manager, context, page, token_box["value"], auth_state
+            with contextlib.suppress(Exception):
+                set_token(await page.evaluate(_STORAGE_JS))
+            if token_box["value"]:
+                return manager, context, page, token_box["value"], auth_state
+            if time.time() >= next_chatbox_nudge:
                 with contextlib.suppress(Exception):
-                    set_token(await page.evaluate(_STORAGE_JS))
-                if token_box["value"]:
-                    return token_box["value"]
-                if time.time() >= next_chatbox_nudge:
-                    with contextlib.suppress(Exception):
-                        await _nudge_chatbox(page)
-                    next_chatbox_nudge = time.time() + 5
-                remaining = deadline - time.time()
-                if remaining <= 0:
-                    break
-                try:
-                    await asyncio.wait_for(token_event.wait(), timeout=min(1.0, remaining))
-                except asyncio.TimeoutError:
-                    pass
-        finally:
-            await context.close()
-            await manager.__aexit__(None, None, None)
+                    await _nudge_chatbox(page)
+                next_chatbox_nudge = time.time() + 5
+            remaining = deadline - time.time()
+            if remaining <= 0:
+                break
+            try:
+                await asyncio.wait_for(token_event.wait(), timeout=min(1.0, remaining))
+            except asyncio.TimeoutError:
+                pass
     except PlaywrightRefreshError:
         raise
     except Exception as exc:
         raise PlaywrightRefreshError(f"Playwright token capture failed: {exc}") from exc
+    finally:
+        if token_box["value"] is None:
+            with contextlib.suppress(Exception):
+                if context is not None:
+                    await context.close()
+            with contextlib.suppress(Exception):
+                if manager is not None:
+                    await manager.__aexit__(None, None, None)
 
     raise PlaywrightRefreshError(
         "Timed out waiting for a Copilot access token. If this is the first run, "
         "execute `copilot-openai-proxy login` in headed mode and complete the sign-in flow."
     )
+
+
+async def _maybe_auto_probe_models(
+    settings: Settings,
+    *,
+    context,
+    auth_state: AuthenticatedSessionState,
+) -> None:
+    if not settings.auto_probe_models_on_login:
+        return
+    if not auth_state.saw_login_host:
+        return
+    try:
+        from .playwright_model_probe import maybe_auto_probe_models_in_context
+
+        await maybe_auto_probe_models_in_context(context=context, settings=settings)
+    except Exception as exc:
+        print(f"Model probe failed after login: {exc}")
 
 
 async def login_with_playwright(
@@ -328,13 +383,22 @@ async def login_with_playwright(
     *,
     headed: bool = True,
 ) -> Path:
-    token = await _capture_token(
-        settings,
-        headed=headed,
-        timeout_seconds=timeout_seconds,
-        allow_manual_reauth=headed,
-    )
-    return write_access_token(settings, token)
+    manager = None
+    context = None
+    try:
+        manager, context, _page, token, auth_state = await open_authenticated_context(
+            settings,
+            headed=headed,
+            timeout_seconds=timeout_seconds,
+            allow_manual_reauth=headed,
+        )
+        await _maybe_auto_probe_models(settings, context=context, auth_state=auth_state)
+        return write_access_token(settings, token)
+    finally:
+        if context is not None:
+            await context.close()
+        if manager is not None:
+            await manager.__aexit__(None, None, None)
 
 
 async def refresh_token_with_playwright(
@@ -343,8 +407,21 @@ async def refresh_token_with_playwright(
     headed: bool = False,
     timeout_seconds: int = 90,
 ) -> Path:
-    token = await _capture_token(settings, headed=headed, timeout_seconds=timeout_seconds)
-    return write_access_token(settings, token)
+    manager = None
+    context = None
+    try:
+        manager, context, _page, token, auth_state = await open_authenticated_context(
+            settings,
+            headed=headed,
+            timeout_seconds=timeout_seconds,
+        )
+        await _maybe_auto_probe_models(settings, context=context, auth_state=auth_state)
+        return write_access_token(settings, token)
+    finally:
+        if context is not None:
+            await context.close()
+        if manager is not None:
+            await manager.__aexit__(None, None, None)
 
 
 async def run_refresh_daemon(settings: Settings) -> None:

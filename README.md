@@ -18,6 +18,7 @@ The proxy connects to `substrate.office.com` — the same WebSocket API the M365
 
 - Token expires in ~1 hour. A Playwright refresher is included for one-time login plus automatic refresh.
 - By default, each request starts a new Copilot conversation.
+- Optional conversation reuse can be enabled globally to continue the latest matching conversation state from a local SQLite cache.
 - System prompts and conversation history are folded into the message as plain text.
 - Tool calls and token usage are not supported.
 - **Claude Code:** Agentic features (file reading, bash, code editing) require tool use, which this proxy does not support. Use the proxy for general Q&A only; keep Claude Code on the real Anthropic API for coding tasks.
@@ -90,7 +91,7 @@ The local cache is stored in SQLite and only tracks the latest checkpoint for ea
 
 ### 6. Optional debug logging
 
-Verbose proxy logging is off by default. To log sanitized request bodies, translated prompts, and conversation reuse routing decisions:
+Verbose proxy logging is off by default. To log sanitized request bodies, ignored tool-related fields, translated prompts, and conversation reuse routing decisions:
 
 ```bash
 M365_DEBUG_LOGGING=true
@@ -101,6 +102,47 @@ With Docker Compose, set it in `.env` and inspect the API logs with:
 ```bash
 docker compose logs -f api
 ```
+
+### 7. Optional Copilot model selection
+
+After a real Microsoft login or reauthentication, the Playwright refresher now probes the live Copilot UI and logs:
+
+- the visible top-level model labels
+- the visible nested `GPT` submenu labels
+- the observed transport mapping for each label
+
+That automatic probe is enabled by default:
+
+```bash
+M365_AUTO_PROBE_MODELS_ON_LOGIN=true
+```
+
+Set it to `false` to skip probing entirely.
+
+The proxy can optionally request a specific Copilot conversation model by exact visible UI label:
+
+```bash
+M365_COPILOT_MODEL_NAME="GPT 5.5 Think Deeper"
+```
+
+The OpenAI-facing API model id still stays `m365-copilot`, and conversation reuse remains keyed only on request history, not on the selected Copilot model.
+
+The live post-login probe is the authoritative source of truth. The proxy currently includes validated transport mappings for these observed labels:
+
+- `Auto`
+- `Quick Response`
+- `Think Deeper`
+- `GPT 5.5 Think Deeper`
+- `GPT 5.3 Quick Response`
+- `GPT 5.4 Think Deeper`
+- `GPT 5.2 Quick Response`
+- `GPT 5.2 Think Deeper`
+
+Each of those currently maps to a `tone` value observed on the real websocket request. `threadLevelGptId` is left empty unless a future live probe proves otherwise.
+
+If `M365_COPILOT_MODEL_NAME` does not exactly match a validated label, the proxy logs a warning and falls back to the default Copilot model selection.
+
+`copilot-openai-proxy probe-models` is still available as a developer convenience, but the supported user path is the automatic post-login probe.
 
 ---
 
@@ -167,6 +209,8 @@ If a headed login still does not exit after sign-in, click into the chat box and
 If the saved profile lands on `Enter password` and no credential env vars are set, Microsoft is requiring interactive reauthentication and the headless refresher cannot complete that step by itself.
 
 Once `Token saved to /data/access_token.txt.` is printed and the command exits, `docker compose up -d` is enough for normal headless operation.
+
+When that login or reauthentication passes through the real Microsoft sign-in flow, the refresher also runs the model probe automatically and prints the discovered labels plus the observed websocket transport mapping. That probe is for discovery and logging only; a failure there does not fail token acquisition.
 
 ---
 
@@ -281,7 +325,8 @@ $r.content[0].text
 | `M365_ACCESS_TOKEN` | unset | Fallback bearer token when no token file exists |
 | `M365_ACCESS_TOKEN_FILE` | `.state/access_token.txt` | Shared token file used by the API and refresher |
 | `M365_PROFILE_DIR` | `.state/profile` | Persistent Playwright browser profile |
-| `M365_DEBUG_LOGGING` | `false` | Emit sanitized proxy request, translation, and routing logs |
+| `M365_AUTO_PROBE_MODELS_ON_LOGIN` | `true` | After a real login or reauthentication, probe the live Copilot UI and log visible model labels plus observed transport mappings |
+| `M365_COPILOT_MODEL_NAME` | unset | Optional exact visible Copilot UI label to request for new turns; falls back to default if the label has no validated transport mapping |
 | `M365_ENABLE_CONVERSATION_REUSE` | `false` | Reuse the latest matching Copilot conversation from the local history DB |
 | `M365_CONVERSATION_DB_PATH` | `.state/conversation_reuse.db` | SQLite database for conversation reuse state |
 | `M365_CONVERSATION_MAX_CONVERSATIONS` | `500` | Maximum number of cached conversation rows before LRU eviction |

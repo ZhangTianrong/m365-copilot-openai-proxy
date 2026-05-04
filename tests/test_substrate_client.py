@@ -5,8 +5,15 @@ import json
 
 import httpx
 
+from m365_copilot_openai_proxy.copilot_models import (
+    CopilotModelTransport,
+    resolve_copilot_model_transport,
+)
 from m365_copilot_openai_proxy.models import TranslatedImage, UploadedImage
-from m365_copilot_openai_proxy.substrate_client import SIGNALR_SEP, SubstrateCopilotClient
+from m365_copilot_openai_proxy.substrate_client import (
+    SIGNALR_SEP,
+    SubstrateCopilotClient,
+)
 
 _TEST_JWT = (
     "eyJhbGciOiJub25lIn0."
@@ -25,7 +32,14 @@ def test_chat_invoke_includes_image_annotations() -> None:
         UploadedImage(doc_id="doc-2", file_name="image-2.jpg", file_type="jpg"),
     ]
 
-    payload = client._chat_invoke("describe", "conv-1", "session-1", "req-1", uploaded_images)
+    payload = client._chat_invoke(
+        "describe",
+        "conv-1",
+        "session-1",
+        "req-1",
+        uploaded_images,
+        is_start_of_session=True,
+    )
     body = json.loads(payload.removesuffix(SIGNALR_SEP))
     message = body["arguments"][0]["message"]
 
@@ -52,6 +66,67 @@ def test_chat_invoke_includes_image_annotations() -> None:
             "messageAnnotationType": "ImageFile",
         },
     ]
+
+
+def test_chat_invoke_includes_selected_copilot_model_tone() -> None:
+    client = SubstrateCopilotClient(
+        _TEST_JWT,
+        "America/New_York",
+        model_transport=CopilotModelTransport(
+            visible_name="GPT 5.5 Think Deeper",
+            tone="Gpt_5_5_Reasoning",
+        ),
+    )
+
+    payload = client._chat_invoke(
+        "describe",
+        "conv-1",
+        "session-1",
+        "req-1",
+        [],
+        is_start_of_session=True,
+    )
+    body = json.loads(payload.removesuffix(SIGNALR_SEP))
+
+    assert body["arguments"][0]["threadLevelGptId"] == {}
+    assert body["arguments"][0]["tone"] == "Gpt_5_5_Reasoning"
+
+
+def test_resolve_copilot_model_transport_exact_match_and_fallback() -> None:
+    transport, warning = resolve_copilot_model_transport("GPT 5.4 Think Deeper")
+    assert transport is not None
+    assert transport.visible_name == "GPT 5.4 Think Deeper"
+    assert transport.tone == "Gpt_5_4_Reasoning"
+    assert transport.thread_level_gpt_id == {}
+    assert warning is None
+
+    transport, warning = resolve_copilot_model_transport("gpt 5.4 think deeper")
+    assert transport is None
+    assert warning is not None
+    assert "validated transport mapping yet" in warning
+
+
+def test_resolve_copilot_model_transport_auto() -> None:
+    transport, warning = resolve_copilot_model_transport("Auto")
+    assert transport is not None
+    assert transport.visible_name == "Auto"
+    assert transport.tone == "Magic"
+    assert warning is None
+
+
+def test_chat_invoke_omits_tone_without_selected_model() -> None:
+    client = build_client()
+
+    payload = client._chat_invoke(
+        "describe",
+        "conv-1",
+        "session-1",
+        "req-1",
+        [],
+        is_start_of_session=True,
+    )
+    body = json.loads(payload.removesuffix(SIGNALR_SEP))
+    assert "tone" not in body["arguments"][0]
 
 
 def test_upload_image_uses_expected_headers_and_form_fields(monkeypatch) -> None:

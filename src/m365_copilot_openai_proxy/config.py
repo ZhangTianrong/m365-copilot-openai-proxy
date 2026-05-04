@@ -24,6 +24,10 @@ class Settings(BaseSettings):
         default=500,
         alias="M365_CONVERSATION_MAX_CONVERSATIONS",
     )
+    auto_probe_models_on_login: bool = Field(
+        default=True,
+        alias="M365_AUTO_PROBE_MODELS_ON_LOGIN",
+    )
     login_url: str = Field(default="https://m365.cloud.microsoft/chat", alias="M365_LOGIN_URL")
     browser_channel: str | None = Field(default=None, alias="M365_BROWSER_CHANNEL")
     login_email: str | None = Field(default=None, alias="M365_LOGIN_EMAIL")
@@ -34,3 +38,4 @@ class Settings(BaseSettings):
     token_refresh_retry_seconds: int = Field(default=30, alias="M365_TOKEN_REFRESH_RETRY_SECONDS")
     time_zone: str = Field(default="Asia/Tokyo", alias="M365_TIME_ZONE")
     model_alias: str = Field(default="m365-copilot", alias="M365_MODEL_ALIAS")
+    copilot_model_name: str | None = Field(default=None, alias="M365_COPILOT_MODEL_NAME")

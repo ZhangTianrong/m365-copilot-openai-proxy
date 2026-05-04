@@ -4,6 +4,7 @@ import asyncio
 
 from m365_copilot_openai_proxy.config import Settings
 from m365_copilot_openai_proxy.playwright_refresh import (
+    AuthenticatedSessionState,
     _advance_login_flow,
     _capture_token,
     login_with_playwright,
@@ -341,3 +342,165 @@ def test_refresh_daemon_retries_startup_refresh_until_success(monkeypatch, tmp_p
 
     assert refresh_attempts["count"] == 2
     assert sleep_delays[0] == settings.token_refresh_retry_seconds
+
+
+def test_login_with_playwright_runs_model_probe_after_reauth_when_enabled(monkeypatch, tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
+        M365_ACCESS_TOKEN_FILE=str(tmp_path / "access_token.txt"),
+        M365_AUTO_PROBE_MODELS_ON_LOGIN=True,
+    )
+    page = FakePage([])
+    context = FakeContext(page)
+    manager = FakePlaywrightManager(context)
+    probe_calls: list[tuple[FakeContext, bool]] = []
+
+    async def fake_open_authenticated_context(*args, **kwargs):
+        return manager, context, page, "eyJ.fake", AuthenticatedSessionState(saw_login_host=True)
+
+    async def fake_probe_impl(*, context, settings, prompt=None):
+        probe_calls.append((context, settings.auto_probe_models_on_login))
+
+    def fake_write_access_token(_settings: Settings, token: str):
+        path = tmp_path / "access_token.txt"
+        path.write_text(token, encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_refresh.open_authenticated_context",
+        fake_open_authenticated_context,
+    )
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_model_probe.maybe_auto_probe_models_in_context",
+        fake_probe_impl,
+    )
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_refresh.write_access_token",
+        fake_write_access_token,
+    )
+
+    path = asyncio.run(login_with_playwright(settings, headed=False))
+
+    assert path == tmp_path / "access_token.txt"
+    assert probe_calls == [(context, True)]
+    assert context.closed is True
+    assert manager.closed is True
+
+
+def test_login_with_playwright_skips_model_probe_when_disabled(monkeypatch, tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
+        M365_ACCESS_TOKEN_FILE=str(tmp_path / "access_token.txt"),
+        M365_AUTO_PROBE_MODELS_ON_LOGIN=False,
+    )
+    page = FakePage([])
+    context = FakeContext(page)
+    manager = FakePlaywrightManager(context)
+    probe_calls: list[str] = []
+
+    async def fake_open_authenticated_context(*args, **kwargs):
+        return manager, context, page, "eyJ.fake", AuthenticatedSessionState(saw_login_host=True)
+
+    async def fake_probe_impl(*, context, settings, prompt=None):
+        probe_calls.append("called")
+
+    def fake_write_access_token(_settings: Settings, token: str):
+        path = tmp_path / "access_token.txt"
+        path.write_text(token, encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_refresh.open_authenticated_context",
+        fake_open_authenticated_context,
+    )
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_model_probe.maybe_auto_probe_models_in_context",
+        fake_probe_impl,
+    )
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_refresh.write_access_token",
+        fake_write_access_token,
+    )
+
+    asyncio.run(login_with_playwright(settings, headed=False))
+
+    assert probe_calls == []
+
+
+def test_login_with_playwright_probe_failure_does_not_fail_token_acquisition(monkeypatch, tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
+        M365_ACCESS_TOKEN_FILE=str(tmp_path / "access_token.txt"),
+        M365_AUTO_PROBE_MODELS_ON_LOGIN=True,
+    )
+    page = FakePage([])
+    context = FakeContext(page)
+    manager = FakePlaywrightManager(context)
+
+    async def fake_open_authenticated_context(*args, **kwargs):
+        return manager, context, page, "eyJ.fake", AuthenticatedSessionState(saw_login_host=True)
+
+    async def fake_probe_impl(*, context, settings, prompt=None):
+        raise RuntimeError("probe boom")
+
+    def fake_write_access_token(_settings: Settings, token: str):
+        path = tmp_path / "access_token.txt"
+        path.write_text(token, encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_refresh.open_authenticated_context",
+        fake_open_authenticated_context,
+    )
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_model_probe.maybe_auto_probe_models_in_context",
+        fake_probe_impl,
+    )
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_refresh.write_access_token",
+        fake_write_access_token,
+    )
+
+    path = asyncio.run(login_with_playwright(settings, headed=False))
+
+    assert path == tmp_path / "access_token.txt"
+
+
+def test_login_with_playwright_skips_probe_without_reauth(monkeypatch, tmp_path) -> None:
+    settings = Settings(
+        _env_file=None,
+        M365_ACCESS_TOKEN_FILE=str(tmp_path / "access_token.txt"),
+        M365_AUTO_PROBE_MODELS_ON_LOGIN=True,
+    )
+    page = FakePage([])
+    context = FakeContext(page)
+    manager = FakePlaywrightManager(context)
+    probe_calls: list[str] = []
+
+    async def fake_open_authenticated_context(*args, **kwargs):
+        return manager, context, page, "eyJ.fake", AuthenticatedSessionState(saw_login_host=False)
+
+    async def fake_probe_impl(*, context, settings, prompt=None):
+        probe_calls.append("called")
+
+    def fake_write_access_token(_settings: Settings, token: str):
+        path = tmp_path / "access_token.txt"
+        path.write_text(token, encoding="utf-8")
+        return path
+
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_refresh.open_authenticated_context",
+        fake_open_authenticated_context,
+    )
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_model_probe.maybe_auto_probe_models_in_context",
+        fake_probe_impl,
+    )
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.playwright_refresh.write_access_token",
+        fake_write_access_token,
+    )
+
+    asyncio.run(login_with_playwright(settings, headed=False))
+
+    assert probe_calls == []

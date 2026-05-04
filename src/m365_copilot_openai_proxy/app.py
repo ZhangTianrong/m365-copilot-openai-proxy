@@ -11,12 +11,20 @@ from typing import Any
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .copilot_models import resolve_copilot_model_transport
 from .conversation_reuse import ConversationReuseService, PreparedConversationTurn
 from .config import Settings
-from .substrate_client import SubstrateCopilotClient, SubstrateCopilotError
+from .substrate_client import (
+    SubstrateCopilotClient,
+    SubstrateCopilotError,
+)
 from .token_store import TokenStoreError, load_access_token
 from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest
-from .translator import translate_anthropic_request, translate_openai_request, translate_responses_request
+from .translator import (
+    translate_anthropic_request,
+    translate_openai_request,
+    translate_responses_request,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +46,11 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(title="Microsoft 365 Copilot OpenAI Proxy")
     resolved_settings = settings or Settings()
+    model_transport, model_warning = resolve_copilot_model_transport(
+        resolved_settings.copilot_model_name
+    )
+    if model_warning:
+        logger.warning(model_warning)
     if resolved_settings.debug_logging:
         logger.setLevel(logging.INFO)
         _ensure_debug_handler()
@@ -45,11 +58,16 @@ def create_app(
             resolved_settings,
             "debug.enabled",
             conversation_reuse_enabled=resolved_settings.enable_conversation_reuse,
+            copilot_model_name=model_transport.visible_name if model_transport else "Auto",
         )
     app.state.settings = resolved_settings
     app.state.conversation_reuse_service = ConversationReuseService(resolved_settings)
     app.state.copilot_client_factory = copilot_client_factory or (
-        lambda: SubstrateCopilotClient(load_access_token(resolved_settings), resolved_settings.time_zone)
+        lambda: SubstrateCopilotClient(
+            load_access_token(resolved_settings),
+            resolved_settings.time_zone,
+            model_transport=model_transport,
+        )
     )
 
     def get_settings() -> Settings:

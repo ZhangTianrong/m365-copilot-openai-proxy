@@ -10,6 +10,7 @@ import uvicorn
 
 from .app import create_app
 from .config import Settings
+from .playwright_model_probe import run_probe
 from .playwright_refresh import (
     PlaywrightRefreshError,
     login_with_playwright,
@@ -41,6 +42,13 @@ def main() -> None:
     refresh_parser.add_argument("--headed", action="store_true")
     refresh_parser.add_argument("--timeout", type=int, default=90)
     refresh_parser.set_defaults(func=refresh_token_command)
+
+    probe_parser = subparsers.add_parser("probe-models")
+    probe_parser.add_argument("--headed", action="store_true")
+    probe_parser.add_argument("--timeout", type=int, default=300)
+    probe_parser.add_argument("--target-model")
+    probe_parser.add_argument("--login-url", default="https://m365.cloud.microsoft/chat")
+    probe_parser.set_defaults(func=probe_models_command)
 
     subparsers.add_parser("refresh-daemon").set_defaults(func=refresh_daemon_command)
     subparsers.add_parser("launch-edge").set_defaults(func=launch_edge_command)
@@ -116,6 +124,26 @@ def refresh_token_command(args: argparse.Namespace) -> None:
         print(f"Refresh failed: {exc}")
         raise SystemExit(1) from exc
     print(f"Token saved to {path}.")
+
+
+def probe_models_command(args: argparse.Namespace) -> None:
+    try:
+        asyncio.run(
+            run_probe(
+                profile_dir=None,
+                login_url=args.login_url,
+                target_model=args.target_model,
+                prompt="Reply with only OK.",
+                headless=not args.headed,
+                timeout_seconds=args.timeout,
+            )
+        )
+    except PlaywrightRefreshError as exc:
+        print(f"Model probe failed: {exc}")
+        raise SystemExit(1) from exc
+    except Exception as exc:
+        print(f"Model probe failed: {exc}")
+        raise SystemExit(1) from exc
 
 
 def refresh_daemon_command(_args: argparse.Namespace) -> None:
