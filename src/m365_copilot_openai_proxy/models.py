@@ -93,7 +93,15 @@ class UploadedImage(BaseModel):
     uploaded_file_name: str | None = None
 
 
+class HistoryTurn(BaseModel):
+    role: str
+    text: str
+
+
 class TranslatedRequest(BaseModel):
     prompt: str
     additional_context: list[str] = Field(default_factory=list)
     images: list[TranslatedImage] = Field(default_factory=list)
+    current_images: list[TranslatedImage] = Field(default_factory=list)
+    system_text: str = ""
+    prior_turns: list[HistoryTurn] = Field(default_factory=list)

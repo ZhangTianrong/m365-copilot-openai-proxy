@@ -14,6 +14,15 @@ class Settings(BaseSettings):
     access_token: str | None = Field(default=None, alias="M365_ACCESS_TOKEN")
     access_token_file: str = Field(default=".state/access_token.txt", alias="M365_ACCESS_TOKEN_FILE")
     profile_dir: str = Field(default=".state/profile", alias="M365_PROFILE_DIR")
+    enable_conversation_reuse: bool = Field(default=False, alias="M365_ENABLE_CONVERSATION_REUSE")
+    conversation_db_path: str = Field(
+        default=".state/conversation_reuse.db",
+        alias="M365_CONVERSATION_DB_PATH",
+    )
+    conversation_max_conversations: int = Field(
+        default=500,
+        alias="M365_CONVERSATION_MAX_CONVERSATIONS",
+    )
     login_url: str = Field(default="https://m365.cloud.microsoft/chat", alias="M365_LOGIN_URL")
     browser_channel: str | None = Field(default=None, alias="M365_BROWSER_CHANNEL")
     login_email: str | None = Field(default=None, alias="M365_LOGIN_EMAIL")

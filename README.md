@@ -17,7 +17,7 @@ The proxy connects to `substrate.office.com` — the same WebSocket API the M365
 ## Constraints
 
 - Token expires in ~1 hour. A Playwright refresher is included for one-time login plus automatic refresh.
-- Each request starts a new Copilot conversation (no persistent sessions).
+- By default, each request starts a new Copilot conversation.
 - System prompts and conversation history are folded into the message as plain text.
 - Tool calls and token usage are not supported.
 - **Claude Code:** Agentic features (file reading, bash, code editing) require tool use, which this proxy does not support. Use the proxy for general Q&A only; keep Claude Code on the real Anthropic API for coding tasks.
@@ -71,6 +71,22 @@ uv run copilot-openai-proxy serve --host 127.0.0.1 --port 8000
 ```
 
 The API reads the token from `M365_ACCESS_TOKEN_FILE` on demand, so refreshed tokens are picked up without restarting the server.
+
+### 5. Optional conversation reuse
+
+Conversation reuse is off by default. To let the proxy continue the latest matching Copilot thread instead of always starting a fresh one, enable:
+
+```bash
+M365_ENABLE_CONVERSATION_REUSE=true
+```
+
+When enabled, the proxy:
+
+- hashes the request history excluding the current final user message
+- reuses a stored Copilot conversation when that latest-history key matches
+- otherwise falls back to the current stateless behavior and reconstructs prior history into the prompt prefix
+
+The local cache is stored in SQLite and only tracks the latest checkpoint for each Copilot conversation.
 
 ---
 
@@ -251,6 +267,9 @@ $r.content[0].text
 | `M365_ACCESS_TOKEN` | unset | Fallback bearer token when no token file exists |
 | `M365_ACCESS_TOKEN_FILE` | `.state/access_token.txt` | Shared token file used by the API and refresher |
 | `M365_PROFILE_DIR` | `.state/profile` | Persistent Playwright browser profile |
+| `M365_ENABLE_CONVERSATION_REUSE` | `false` | Reuse the latest matching Copilot conversation from the local history DB |
+| `M365_CONVERSATION_DB_PATH` | `.state/conversation_reuse.db` | SQLite database for conversation reuse state |
+| `M365_CONVERSATION_MAX_CONVERSATIONS` | `500` | Maximum number of cached conversation rows before LRU eviction |
 | `M365_LOGIN_URL` | `https://m365.cloud.microsoft/chat` | Page the refresher opens to obtain a token |
 | `M365_BROWSER_CHANNEL` | unset | Optional Playwright browser channel such as `msedge` |
 | `M365_TOKEN_CAPTURE_TIMEOUT_SECONDS` | `600` | How long login or daemon refresh attempts wait for Copilot token capture |

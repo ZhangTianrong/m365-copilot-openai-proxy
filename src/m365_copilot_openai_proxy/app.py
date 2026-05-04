@@ -8,6 +8,7 @@ from collections.abc import AsyncIterator, Callable
 from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
+from .conversation_reuse import ConversationReuseService, PreparedConversationTurn
 from .config import Settings
 from .substrate_client import SubstrateCopilotClient, SubstrateCopilotError
 from .token_store import TokenStoreError, load_access_token
@@ -22,6 +23,7 @@ def create_app(
     app = FastAPI(title="Microsoft 365 Copilot OpenAI Proxy")
     resolved_settings = settings or Settings()
     app.state.settings = resolved_settings
+    app.state.conversation_reuse_service = ConversationReuseService(resolved_settings)
     app.state.copilot_client_factory = copilot_client_factory or (
         lambda: SubstrateCopilotClient(load_access_token(resolved_settings), resolved_settings.time_zone)
     )
@@ -34,6 +36,9 @@ def create_app(
             return app.state.copilot_client_factory()
         except (SubstrateCopilotError, TokenStoreError) as exc:
             raise HTTPException(status_code=502, detail=str(exc)) from exc
+
+    def get_conversation_reuse_service() -> ConversationReuseService:
+        return app.state.conversation_reuse_service
 
     @app.get("/healthz")
     async def healthz() -> dict[str, str]:
@@ -57,28 +62,37 @@ def create_app(
         request: OpenAIChatRequest,
         settings: Settings = Depends(get_settings),
         client: SubstrateCopilotClient = Depends(get_copilot_client),
+        conversation_reuse: ConversationReuseService = Depends(get_conversation_reuse_service),
     ):
         try:
             translated = translate_openai_request(request)
+            turn = conversation_reuse.prepare_turn(
+                translated,
+                scope_user=request.user,
+            )
             if request.stream:
                 return StreamingResponse(
                     _openai_stream(
                         settings.model_alias,
                         client,
-                        translated.prompt,
-                        translated.additional_context,
-                        translated.images,
+                        conversation_reuse,
+                        turn,
                     ),
                     media_type="text/event-stream",
                 )
             text = await client.chat(
-                translated.prompt,
-                translated.additional_context,
-                translated.images,
+                turn.prompt,
+                turn.additional_context,
+                turn.images,
+                conversation_id=turn.conversation_id,
+                is_start_of_session=turn.is_start_of_session,
             )
+            conversation_reuse.complete_turn(turn, text)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except SubstrateCopilotError as exc:
+            if "turn" in locals():
+                conversation_reuse.abort_turn(turn)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         return JSONResponse({
@@ -100,11 +114,13 @@ def create_app(
         raw: Request,
         settings: Settings = Depends(get_settings),
         client: SubstrateCopilotClient = Depends(get_copilot_client),
+        conversation_reuse: ConversationReuseService = Depends(get_conversation_reuse_service),
     ):
         body = await raw.json()
         try:
             request = OpenAIResponsesRequest.model_validate(body)
             translated = translate_responses_request(request)
+            turn = conversation_reuse.prepare_turn(translated, scope_user=None)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
@@ -113,20 +129,23 @@ def create_app(
                 _responses_stream(
                     settings.model_alias,
                     client,
-                    translated.prompt,
-                    translated.additional_context,
-                    translated.images,
+                    conversation_reuse,
+                    turn,
                 ),
                 media_type="text/event-stream",
             )
 
         try:
             text = await client.chat(
-                translated.prompt,
-                translated.additional_context,
-                translated.images,
+                turn.prompt,
+                turn.additional_context,
+                turn.images,
+                conversation_id=turn.conversation_id,
+                is_start_of_session=turn.is_start_of_session,
             )
+            conversation_reuse.complete_turn(turn, text)
         except SubstrateCopilotError as exc:
+            conversation_reuse.abort_turn(turn)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         return JSONResponse({
@@ -148,21 +167,30 @@ def create_app(
         request: AnthropicMessagesRequest,
         settings: Settings = Depends(get_settings),
         client: SubstrateCopilotClient = Depends(get_copilot_client),
+        conversation_reuse: ConversationReuseService = Depends(get_conversation_reuse_service),
     ):
         try:
             translated = translate_anthropic_request(request)
+            turn = conversation_reuse.prepare_turn(translated, scope_user=None)
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
 
         if request.stream:
             return StreamingResponse(
-                _anthropic_stream(settings.model_alias, client, translated.prompt, translated.additional_context),
+                _anthropic_stream(settings.model_alias, client, conversation_reuse, turn),
                 media_type="text/event-stream",
             )
 
         try:
-            text = await client.chat(translated.prompt, translated.additional_context)
+            text = await client.chat(
+                turn.prompt,
+                turn.additional_context,
+                conversation_id=turn.conversation_id,
+                is_start_of_session=turn.is_start_of_session,
+            )
+            conversation_reuse.complete_turn(turn, text)
         except SubstrateCopilotError as exc:
+            conversation_reuse.abort_turn(turn)
             raise HTTPException(status_code=502, detail=str(exc)) from exc
 
         return JSONResponse({
@@ -182,9 +210,8 @@ def create_app(
 async def _openai_stream(
     model_alias: str,
     client: SubstrateCopilotClient,
-    prompt: str,
-    additional_context: list[str],
-    images,
+    conversation_reuse: ConversationReuseService,
+    turn: PreparedConversationTurn,
 ) -> AsyncIterator[str]:
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
@@ -196,15 +223,27 @@ async def _openai_stream(
         "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
     }
     yield f"data: {json.dumps(first_chunk)}\n\n"
-    async for delta in client.chat_stream(prompt, additional_context, images):
-        chunk = {
-            "id": completion_id,
-            "object": "chat.completion.chunk",
-            "created": created,
-            "model": model_alias,
-            "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
-        }
-        yield f"data: {json.dumps(chunk)}\n\n"
+    full_text = ""
+    try:
+        async for delta in client.chat_stream(
+            turn.prompt,
+            turn.additional_context,
+            turn.images,
+            conversation_id=turn.conversation_id,
+            is_start_of_session=turn.is_start_of_session,
+        ):
+            full_text += delta
+            chunk = {
+                "id": completion_id,
+                "object": "chat.completion.chunk",
+                "created": created,
+                "model": model_alias,
+                "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
+            }
+            yield f"data: {json.dumps(chunk)}\n\n"
+    except Exception:
+        conversation_reuse.abort_turn(turn)
+        raise
     final_chunk = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -212,6 +251,7 @@ async def _openai_stream(
         "model": model_alias,
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
     }
+    conversation_reuse.complete_turn(turn, full_text)
     yield f"data: {json.dumps(final_chunk)}\n\n"
     yield "data: [DONE]\n\n"
 
@@ -219,9 +259,8 @@ async def _openai_stream(
 async def _responses_stream(
     model_alias: str,
     client: SubstrateCopilotClient,
-    prompt: str,
-    additional_context: list[str],
-    images,
+    conversation_reuse: ConversationReuseService,
+    turn: PreparedConversationTurn,
 ) -> AsyncIterator[str]:
     resp_id = f"resp_{uuid.uuid4().hex}"
     item_id = f"msg_{uuid.uuid4().hex}"
@@ -232,19 +271,30 @@ async def _responses_stream(
     yield f"data: {json.dumps({'type': 'response.content_part.added', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': ''}})}\n\n"
 
     full_text = ""
-    async for delta in client.chat_stream(prompt, additional_context, images):
-        full_text += delta
-        yield f"data: {json.dumps({'type': 'response.output_text.delta', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'delta': delta})}\n\n"
+    try:
+        async for delta in client.chat_stream(
+            turn.prompt,
+            turn.additional_context,
+            turn.images,
+            conversation_id=turn.conversation_id,
+            is_start_of_session=turn.is_start_of_session,
+        ):
+            full_text += delta
+            yield f"data: {json.dumps({'type': 'response.output_text.delta', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'delta': delta})}\n\n"
+    except Exception:
+        conversation_reuse.abort_turn(turn)
+        raise
 
     yield f"data: {json.dumps({'type': 'response.output_text.done', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'text': full_text})}\n\n"
+    conversation_reuse.complete_turn(turn, full_text)
     yield f"data: {json.dumps({'type': 'response.completed', 'response': {'id': resp_id, 'object': 'response', 'created_at': created, 'model': model_alias, 'status': 'completed', 'output': [{'id': item_id, 'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': full_text}]}], 'usage': {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}}})}\n\n"
 
 
 async def _anthropic_stream(
     model_alias: str,
     client: SubstrateCopilotClient,
-    prompt: str,
-    additional_context: list[str],
+    conversation_reuse: ConversationReuseService,
+    turn: PreparedConversationTurn,
 ) -> AsyncIterator[str]:
     msg_id = f"msg_{uuid.uuid4().hex}"
 
@@ -255,9 +305,21 @@ async def _anthropic_stream(
     yield sse("content_block_start", {"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}})
     yield sse("ping", {"type": "ping"})
 
-    async for delta in client.chat_stream(prompt, additional_context):
-        yield sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta}})
+    full_text = ""
+    try:
+        async for delta in client.chat_stream(
+            turn.prompt,
+            turn.additional_context,
+            conversation_id=turn.conversation_id,
+            is_start_of_session=turn.is_start_of_session,
+        ):
+            full_text += delta
+            yield sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta}})
+    except Exception:
+        conversation_reuse.abort_turn(turn)
+        raise
 
     yield sse("content_block_stop", {"type": "content_block_stop", "index": 0})
     yield sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 0}})
+    conversation_reuse.complete_turn(turn, full_text)
     yield sse("message_stop", {"type": "message_stop"})

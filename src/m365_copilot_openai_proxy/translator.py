@@ -8,6 +8,7 @@ from typing import Iterable
 from .models import (
     AnthropicMessagesRequest,
     ContentPart,
+    HistoryTurn,
     OpenAIChatRequest,
     OpenAIResponsesRequest,
     TranslatedImage,
@@ -117,9 +118,11 @@ def _render_message_text(text: str, image_refs: list[str]) -> str:
 
 def translate_openai_request(request: OpenAIChatRequest) -> TranslatedRequest:
     system_lines: list[str] = []
+    prior_turns: list[HistoryTurn] = []
     transcript_lines: list[str] = []
     prompt = ""
     images: list[TranslatedImage] = []
+    current_images: list[TranslatedImage] = []
 
     for index, message in enumerate(request.messages):
         is_last = index == len(request.messages) - 1
@@ -139,7 +142,9 @@ def translate_openai_request(request: OpenAIChatRequest) -> TranslatedRequest:
             if message.role != "user":
                 raise ValueError("The final OpenAI message must be a user message.")
             prompt = rendered_text
+            current_images = list(message_images)
             continue
+        prior_turns.append(HistoryTurn(role=message.role, text=rendered_text))
         transcript_lines.append(f"{message.role.capitalize()}: {rendered_text}")
 
     additional_context: list[str] = []
@@ -149,7 +154,14 @@ def translate_openai_request(request: OpenAIChatRequest) -> TranslatedRequest:
     transcript_text = _join_lines(transcript_lines)
     if transcript_text:
         additional_context.append(f"Prior conversation transcript:\n{transcript_text}")
-    return TranslatedRequest(prompt=prompt, additional_context=additional_context, images=images)
+    return TranslatedRequest(
+        prompt=prompt,
+        additional_context=additional_context,
+        images=images,
+        current_images=current_images,
+        system_text=system_text,
+        prior_turns=prior_turns,
+    )
 
 
 def translate_responses_request(request: OpenAIResponsesRequest) -> TranslatedRequest:
@@ -158,14 +170,17 @@ def translate_responses_request(request: OpenAIResponsesRequest) -> TranslatedRe
         return TranslatedRequest(
             prompt=request.input,
             additional_context=[f"System instructions:\n{instructions}"] if instructions else [],
+            system_text=instructions.strip(),
         )
 
     system_lines: list[str] = []
     if instructions:
         system_lines.append(instructions)
+    prior_turns: list[HistoryTurn] = []
     transcript_lines: list[str] = []
     prompt = ""
     images: list[TranslatedImage] = []
+    current_images: list[TranslatedImage] = []
     items = request.input
     for index, item in enumerate(items):
         role = item.get("role", "") if isinstance(item, dict) else ""
@@ -191,7 +206,9 @@ def translate_responses_request(request: OpenAIResponsesRequest) -> TranslatedRe
             if role != "user":
                 raise ValueError("The final OpenAI input item must be a user message.")
             prompt = rendered_text
+            current_images = list(item_images)
             continue
+        prior_turns.append(HistoryTurn(role=role, text=rendered_text))
         transcript_lines.append(f"{role.capitalize()}: {rendered_text}")
     additional_context: list[str] = []
     system_text = _join_lines(system_lines)
@@ -200,13 +217,21 @@ def translate_responses_request(request: OpenAIResponsesRequest) -> TranslatedRe
     transcript_text = _join_lines(transcript_lines)
     if transcript_text:
         additional_context.append(f"Prior conversation transcript:\n{transcript_text}")
-    return TranslatedRequest(prompt=prompt, additional_context=additional_context, images=images)
+    return TranslatedRequest(
+        prompt=prompt,
+        additional_context=additional_context,
+        images=images,
+        current_images=current_images,
+        system_text=system_text,
+        prior_turns=prior_turns,
+    )
 
 
 def translate_anthropic_request(
     request: AnthropicMessagesRequest,
 ) -> TranslatedRequest:
     system_text = flatten_content(request.system, context="Anthropic system prompt").strip()
+    prior_turns: list[HistoryTurn] = []
     transcript_lines: list[str] = []
     prompt = ""
 
@@ -223,6 +248,7 @@ def translate_anthropic_request(
             continue
         if not text:
             continue
+        prior_turns.append(HistoryTurn(role=message.role, text=text))
         transcript_lines.append(f"{message.role.capitalize()}: {text}")
 
     additional_context: list[str] = []
@@ -231,4 +257,9 @@ def translate_anthropic_request(
     transcript_text = _join_lines(transcript_lines)
     if transcript_text:
         additional_context.append(f"Prior conversation transcript:\n{transcript_text}")
-    return TranslatedRequest(prompt=prompt, additional_context=additional_context)
+    return TranslatedRequest(
+        prompt=prompt,
+        additional_context=additional_context,
+        system_text=system_text,
+        prior_turns=prior_turns,
+    )

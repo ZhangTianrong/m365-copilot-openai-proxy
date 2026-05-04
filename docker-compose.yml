@@ -8,6 +8,9 @@ services:
       M365_ACCESS_TOKEN_FILE: /data/access_token.txt
       M365_TIME_ZONE: ${M365_TIME_ZONE:-Asia/Tokyo}
       M365_MODEL_ALIAS: ${M365_MODEL_ALIAS:-m365-copilot}
+      M365_ENABLE_CONVERSATION_REUSE: ${M365_ENABLE_CONVERSATION_REUSE:-false}
+      M365_CONVERSATION_DB_PATH: ${M365_CONVERSATION_DB_PATH:-/data/conversation_reuse.db}
+      M365_CONVERSATION_MAX_CONVERSATIONS: ${M365_CONVERSATION_MAX_CONVERSATIONS:-500}
     volumes:
       - ./state:/data
     depends_on:
