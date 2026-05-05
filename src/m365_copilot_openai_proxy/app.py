@@ -18,7 +18,7 @@ from .substrate_client import (
     SubstrateCopilotClient,
     SubstrateCopilotError,
 )
-from .token_store import TokenStoreError, load_access_token
+from .token_store import TokenStoreError, load_auth_session
 from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest
 from .translator import (
     translate_anthropic_request,
@@ -64,7 +64,7 @@ def create_app(
     app.state.conversation_reuse_service = ConversationReuseService(resolved_settings)
     app.state.copilot_client_factory = copilot_client_factory or (
         lambda: SubstrateCopilotClient(
-            load_access_token(resolved_settings),
+            load_auth_session(resolved_settings),
             resolved_settings.time_zone,
             model_transport=model_transport,
         )
@@ -130,7 +130,7 @@ def create_app(
             text = await client.chat(
                 turn.prompt,
                 turn.additional_context,
-                turn.images,
+                turn.attachments,
                 conversation_id=turn.conversation_id,
                 is_start_of_session=turn.is_start_of_session,
             )
@@ -206,7 +206,7 @@ def create_app(
             text = await client.chat(
                 turn.prompt,
                 turn.additional_context,
-                turn.images,
+                turn.attachments,
                 conversation_id=turn.conversation_id,
                 is_start_of_session=turn.is_start_of_session,
             )
@@ -401,8 +401,10 @@ def _log_translation_debug(
             {"role": prior_turn.role, "text": _sanitize_debug_value(prior_turn.text)}
             for prior_turn in translated.prior_turns
         ],
-        image_filenames=[image.filename for image in translated.images],
-        current_image_filenames=[image.filename for image in translated.current_images],
+        attachment_filenames=[attachment.filename for attachment in translated.attachments],
+        current_attachment_filenames=[
+            attachment.filename for attachment in translated.current_attachments
+        ],
     )
 
 
@@ -428,7 +430,7 @@ async def _openai_stream(
         async for delta in client.chat_stream(
             turn.prompt,
             turn.additional_context,
-            turn.images,
+            turn.attachments,
             conversation_id=turn.conversation_id,
             is_start_of_session=turn.is_start_of_session,
         ):
@@ -493,7 +495,7 @@ async def _responses_stream(
         async for delta in client.chat_stream(
             turn.prompt,
             turn.additional_context,
-            turn.images,
+            turn.attachments,
             conversation_id=turn.conversation_id,
             is_start_of_session=turn.is_start_of_session,
         ):

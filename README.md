@@ -1,10 +1,10 @@
 # Microsoft 365 Copilot OpenAI Proxy
 
-A local proxy server that exposes your company's Microsoft 365 Copilot as an OpenAI-compatible API. No Azure app registration or admin consent required.
+A local proxy server that exposes Microsoft 365 Copilot as an OpenAI-compatible API. No Azure app registration or admin consent required.
 
 ## How it works
 
-The proxy connects to `substrate.office.com` — the same WebSocket API the M365 Copilot web UI uses — and wraps it in an OpenAI-compatible HTTP server. Authentication uses a short-lived token extracted from your browser session.
+The proxy connects to `substrate.office.com` — the same WebSocket API the M365 Copilot web UI uses — and wraps it in an OpenAI-compatible HTTP server. Authentication uses a short-lived browser session plus a persisted auth snapshot captured from the web UI.
 
 ## Endpoints
 
@@ -47,9 +47,27 @@ uv sync --extra refresh
 uv run copilot-openai-proxy login
 ```
 
-This creates a persistent Playwright browser profile under `.state/profile`, waits for the Copilot page to authenticate, and saves the current token to `.state/access_token.txt`.
+This creates a persistent Playwright browser profile under `.state/profile`, waits for the Copilot page to authenticate, saves an auth snapshot to `.state/auth_session.json`, and mirrors the current token to `.state/access_token.txt`.
+
+Set the account mode explicitly before first login:
+
+```bash
+M365_ACCOUNT_MODE=enterprise
+```
+
+or:
+
+```bash
+M365_ACCOUNT_MODE=personal
+```
 
 If `M365_LOGIN_EMAIL`, `M365_LOGIN_PASSWORD`, and `M365_LOGIN_TOTP_SECRET` are set, the Playwright login flow will first try a fully headless Microsoft sign-in using those credentials and the current TOTP code.
+
+In `personal` mode, the login automation follows the verified consumer path through `login.live.com`, including:
+
+- `Other ways to sign in`
+- `Use your password`
+- `Stay signed in`
 
 ### 3. Start the refresher
 
@@ -71,7 +89,7 @@ Server runs at `http://127.0.0.1:8000` by default.
 uv run copilot-openai-proxy serve --host 127.0.0.1 --port 8000
 ```
 
-The API reads the token from `M365_ACCESS_TOKEN_FILE` on demand, so refreshed tokens are picked up without restarting the server.
+The API reads the auth snapshot from `M365_AUTH_STATE_FILE` on demand, so refreshed tokens and personal-session transport metadata are picked up without restarting the server. `M365_ACCESS_TOKEN_FILE` remains as a compatibility mirror.
 
 ### 5. Optional conversation reuse
 
@@ -202,6 +220,7 @@ After the Copilot page finishes loading, the login and refresh flow now tries to
 
 - submitting the Microsoft email, password, and TOTP steps when those env vars are configured
 - clicking the remembered Microsoft account tile if the profile lands on the account picker
+- on personal accounts, choosing `Other ways to sign in` and `Use your password` when required
 - focusing the Copilot chat box, typing a character, and deleting it without submitting
 
 If a headed login still does not exit after sign-in, click into the chat box and type a character manually as a fallback.
@@ -212,17 +231,21 @@ Once `Token saved to /data/access_token.txt.` is printed and the command exits, 
 
 When that login or reauthentication passes through the real Microsoft sign-in flow, the refresher also runs the model probe automatically and prints the discovered labels plus the observed websocket transport mapping. That probe is for discovery and logging only; a failure there does not fail token acquisition.
 
+If `M365_ACCOUNT_MODE` does not match the actual sign-in flow, login fails fast instead of silently switching behavior. For example, a `personal` Outlook/consumer account must not be run with `M365_ACCOUNT_MODE=enterprise`.
+
 ---
 
 ## Manual fallback
 
-If you want to bypass Playwright entirely, you can still paste a token manually:
+If you want to bypass Playwright entirely, you can still paste credentials manually:
 
 ```powershell
 uv run copilot-openai-proxy set-token
 ```
 
-Paste either the full WebSocket URL or just the `access_token` value. It will be written to the token file.
+In `enterprise` mode, paste either the full WebSocket URL or just the `access_token` value.
+
+In `personal` mode, paste the full Copilot WebSocket URL. A bare token is not enough, because personal sessions also require the captured websocket transport metadata. The auth snapshot will be written to `M365_AUTH_STATE_FILE`, and the token mirror will be written to `M365_ACCESS_TOKEN_FILE`.
 
 ---
 

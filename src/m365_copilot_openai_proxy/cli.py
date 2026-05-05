@@ -17,7 +17,7 @@ from .playwright_refresh import (
     refresh_token_with_playwright,
     run_refresh_daemon,
 )
-from .token_store import write_access_token
+from .token_store import TokenStoreError, parse_websocket_url, write_access_token, write_auth_session
 
 
 def _extract_token(raw: str) -> str | None:
@@ -64,13 +64,27 @@ def main() -> None:
 
 def set_token_command(_args: argparse.Namespace) -> None:
     settings = Settings()
-    print("Paste the full WebSocket URL (or just the access_token value), then press Enter:")
+    if settings.account_mode == "personal":
+        print("Paste the full Copilot WebSocket URL, then press Enter:")
+    else:
+        print("Paste the full WebSocket URL (or just the access_token value), then press Enter:")
     raw = input().strip()
-    token = _extract_token(raw)
-    if not token:
-        print("Error: could not find a valid token. Make sure you copied the full WebSocket URL.")
-        raise SystemExit(1)
-    path = write_access_token(settings, token)
+    try:
+        if settings.account_mode == "personal":
+            if "://" not in raw or "access_token=" not in raw:
+                raise TokenStoreError(
+                    "Personal mode requires a full Copilot WebSocket URL, not a bare token."
+                )
+            path = write_auth_session(settings, parse_websocket_url(raw))
+        else:
+            token = _extract_token(raw)
+            if not token:
+                print("Error: could not find a valid token. Make sure you copied the full WebSocket URL.")
+                raise SystemExit(1)
+            path = write_access_token(settings, token)
+    except TokenStoreError as exc:
+        print(f"Error: {exc}")
+        raise SystemExit(1) from exc
     print(f"Token saved to {path}.")
 
 

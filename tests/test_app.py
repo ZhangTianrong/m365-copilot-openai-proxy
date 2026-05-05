@@ -285,6 +285,72 @@ def test_openai_responses_support_data_url_images(tmp_path) -> None:
     assert images[0].file_extension == "webp"
 
 
+def test_openai_chat_completion_supports_data_url_files(tmp_path) -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake, tmp_path)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "ignored",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Summarize this attachment"},
+                        {
+                            "type": "file",
+                            "file": {
+                                "filename": "receipt.pdf",
+                                "file_data": "data:application/pdf;base64,aGVsbG8=",
+                            },
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200
+    call = fake.calls[0]
+    assert call["prompt"] == (
+        "Summarize this attachment\n\nAttached files for this message: [File 1: receipt.pdf]"
+    )
+    assert len(call["images"]) == 1
+    assert call["images"][0].kind == "file"
+    assert call["images"][0].filename == "receipt.pdf"
+    assert call["images"][0].file_extension == "pdf"
+
+
+def test_openai_responses_support_data_url_files(tmp_path) -> None:
+    fake = FakeCopilotClient()
+    client = build_client(fake, tmp_path)
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "ignored",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Read this file"},
+                        {
+                            "type": "input_file",
+                            "filename": "notes.txt",
+                            "file_data": "data:text/plain;base64,aGVsbG8=",
+                        },
+                    ],
+                }
+            ],
+        },
+    )
+    assert response.status_code == 200
+    call = fake.calls[0]
+    assert call["prompt"] == "Read this file\n\nAttached files for this message: [File 1: notes.txt]"
+    assert len(call["images"]) == 1
+    assert call["images"][0].kind == "file"
+    assert call["images"][0].filename == "notes.txt"
+    assert call["images"][0].file_extension == "txt"
+
+
 def test_anthropic_messages_drop_images(tmp_path) -> None:
     fake = FakeCopilotClient()
     client = build_client(fake, tmp_path)

@@ -9,7 +9,7 @@ from m365_copilot_openai_proxy.copilot_models import (
     CopilotModelTransport,
     resolve_copilot_model_transport,
 )
-from m365_copilot_openai_proxy.models import TranslatedImage, UploadedImage
+from m365_copilot_openai_proxy.models import AuthSessionSnapshot, TranslatedImage, UploadedImage
 from m365_copilot_openai_proxy.substrate_client import (
     SIGNALR_SEP,
     SubstrateCopilotClient,
@@ -23,6 +23,47 @@ _TEST_JWT = (
 
 def build_client() -> SubstrateCopilotClient:
     return SubstrateCopilotClient(_TEST_JWT, "America/New_York")
+
+
+def build_personal_client() -> SubstrateCopilotClient:
+    return SubstrateCopilotClient(
+        AuthSessionSnapshot(
+            account_mode="personal",
+            access_token="eyJhbGciOiJkaXIifQ.test.encrypted.value.more",
+            expires_at=4100000000,
+            captured_at=123,
+            oid="00000000-0000-0000-853e-527a6bf3c11e",
+            tid="84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa",
+            websocket_url=(
+                "wss://substrate.office.com/m365Copilot/Chathub/"
+                "00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
+                "?access_token=eyJhbGciOiJkaXIifQ.test.encrypted.value.more"
+                "&XRoutingParameterSessionKey=session-key"
+                "&clientrequestid=request-id"
+                "&chatsessionid=chat-session-id"
+                "&licenseType=Starter&agent=web&scenario=OfficeWebIncludedCopilot"
+            ),
+        ),
+        "America/New_York",
+    )
+
+
+def build_enterprise_snapshot_client(*, search_access_token: str | None = None) -> SubstrateCopilotClient:
+    return SubstrateCopilotClient(
+        AuthSessionSnapshot(
+            account_mode="enterprise",
+            access_token=_TEST_JWT,
+            expires_at=4100000000,
+            captured_at=123,
+            oid="12345678-1234-1234-1234-1234567890ab",
+            tid="abcdef01-2345-6789-abcd-ef0123456789",
+            graph_access_token="graph-token",
+            graph_expires_at=4100000100,
+            search_access_token=search_access_token,
+            search_expires_at=4100000200 if search_access_token else None,
+        ),
+        "America/New_York",
+    )
 
 
 def test_chat_invoke_includes_image_annotations() -> None:
@@ -65,6 +106,41 @@ def test_chat_invoke_includes_image_annotations() -> None:
             },
             "messageAnnotationType": "ImageFile",
         },
+    ]
+
+
+def test_chat_invoke_includes_file_annotations_for_non_images() -> None:
+    client = build_personal_client()
+    uploaded_files = [
+        UploadedImage(
+            kind="file",
+            doc_id="SPO_drive_item",
+            file_name="receipt.pdf",
+            file_type="pdf",
+            annotation_type="LocalFile",
+            annotation_text="receipt.pdf",
+            annotation_url="https://onedrive.live.com?cid=drive&id=item",
+        ),
+    ]
+
+    payload = client._chat_invoke(
+        "summarize this",
+        "conv-1",
+        "session-1",
+        "req-1",
+        uploaded_files,
+        is_start_of_session=True,
+    )
+    body = json.loads(payload.removesuffix(SIGNALR_SEP))
+    message = body["arguments"][0]["message"]
+
+    assert message["messageAnnotations"] == [
+        {
+            "id": "SPO_drive_item",
+            "text": "receipt.pdf",
+            "url": "https://onedrive.live.com?cid=drive&id=item",
+            "messageAnnotationType": "LocalFile",
+        }
     ]
 
 
@@ -129,6 +205,20 @@ def test_chat_invoke_omits_tone_without_selected_model() -> None:
     assert "tone" not in body["arguments"][0]
 
 
+def test_personal_ws_url_uses_captured_websocket_url_verbatim() -> None:
+    client = build_personal_client()
+
+    assert client._ws_url("conv-1", "session-1", "req-1") == (
+        "wss://substrate.office.com/m365Copilot/Chathub/"
+        "00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
+        "?access_token=eyJhbGciOiJkaXIifQ.test.encrypted.value.more"
+        "&XRoutingParameterSessionKey=session-key"
+        "&clientrequestid=request-id"
+        "&chatsessionid=chat-session-id"
+        "&licenseType=Starter&agent=web&scenario=OfficeWebIncludedCopilot"
+    )
+
+
 def test_upload_image_uses_expected_headers_and_form_fields(monkeypatch) -> None:
     client = build_client()
     image = TranslatedImage(
@@ -177,3 +267,278 @@ def test_upload_image_uses_expected_headers_and_form_fields(monkeypatch) -> None
     assert captured["headers"]["x-scenario"] == "OfficeWebIncludedCopilot"
     assert captured["headers"]["x-variants"] == "feature.EnableImageSupportInUploadFile"
     assert captured["headers"]["Authorization"].startswith("Bearer ")
+
+
+def test_enterprise_file_upload_uses_graph_upload_session_and_business_doc_id(monkeypatch) -> None:
+    client = build_enterprise_snapshot_client(search_access_token="search-token")
+    attachment = TranslatedImage(
+        kind="file",
+        filename="Welcome-to-Copilot-Chat.pdf",
+        mime_type="application/pdf",
+        file_extension="pdf",
+        data_url="data:application/pdf;base64,aGVsbG8=",
+        content=b"hello",
+    )
+    captured: dict[str, object] = {"post_calls": []}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, files=None, headers=None, json=None):
+            captured["post_calls"].append(
+                {"url": url, "files": files, "headers": headers, "json": json}
+            )
+            request = httpx.Request("POST", url)
+            if "createUploadSession" in url:
+                return httpx.Response(
+                    200,
+                    request=request,
+                    json={"uploadUrl": "https://upload.example/business-session"},
+                )
+            return httpx.Response(200, request=request, json={"ApiVersion": "1.0"})
+
+        async def put(self, url, headers=None, content=None):
+            captured["put"] = {"url": url, "headers": headers, "content": content}
+            request = httpx.Request("PUT", url)
+            return httpx.Response(
+                201,
+                request=request,
+                json={
+                    "id": "01HOLHDXPIZMUAOANGN5H26X7S2SEXDZ6F",
+                    "name": "Welcome-to-Copilot-Chat.pdf",
+                    "webUrl": (
+                        "https://pennstateoffice365-my.sharepoint.com/personal/"
+                        "tbz5156_psu_edu/Documents/Microsoft%20Copilot%20Chat%20Files/"
+                        "Welcome-to-Copilot-Chat.pdf"
+                    ),
+                    "file": {"fileExtension": ".pdf", "mimeType": "application/pdf"},
+                    "parentReference": {
+                        "driveType": "business",
+                        "driveId": "b!DinXvIuQ9E-GT7RRmDNne8D23_UivmBHlVHJNN-Y4Cp0uSv7xI1JRafDIVNEn6bB",
+                        "siteId": "bcd7290e-908b-4ff4-864f-b4519833677b",
+                    },
+                },
+            )
+
+    monkeypatch.setattr("m365_copilot_openai_proxy.substrate_client.httpx.AsyncClient", FakeAsyncClient)
+
+    uploaded = asyncio.run(client._upload_image(attachment, conversation_id="conv-upload"))
+
+    create_call = captured["post_calls"][0]
+    unfurl_call = captured["post_calls"][1]
+    assert create_call["url"] == (
+        "https://graph.microsoft.com/v1.0/me/drive/special/copilotuploads:/Welcome-to-Copilot-Chat.pdf:/createUploadSession"
+    )
+    assert create_call["json"] == {
+        "item": {
+            "@microsoft.graph.conflictBehavior": "replace",
+            "name": "Welcome-to-Copilot-Chat.pdf",
+        }
+    }
+    assert captured["put"]["url"] == "https://upload.example/business-session"
+    assert captured["put"]["headers"]["Content-Range"] == "bytes 0-4/5"
+    assert captured["put"]["headers"]["Content-Type"] == "application/octet-stream"
+    assert captured["put"]["content"] == b"hello"
+    assert unfurl_call["url"] == "https://substrate.office.com/searchservice/api/v1/unfurl?domain=File"
+    assert unfurl_call["headers"]["x-anchormailbox"] == (
+        "Oid:12345678-1234-1234-1234-1234567890ab@abcdef01-2345-6789-abcd-ef0123456789"
+    )
+    assert unfurl_call["headers"]["Authorization"] == "Bearer search-token"
+    assert unfurl_call["headers"]["x-routingparameter-sessionkey"] == (
+        "Oid:12345678-1234-1234-1234-1234567890ab@abcdef01-2345-6789-abcd-ef0123456789"
+    )
+    assert unfurl_call["headers"]["x-client-language"] == "en-us"
+    assert isinstance(unfurl_call["headers"]["client-request-id"], str)
+    assert isinstance(unfurl_call["headers"]["client-session-id"], str)
+    assert isinstance(unfurl_call["headers"]["x-client-localtime"], str)
+    assert unfurl_call["json"]["Scenario"]["Dimensions"][0] == {
+        "DimensionName": "ScenarioDescription",
+        "DimensionValue": "OfficeWebIncludedCopilot.prefetch.getdocumentsummary.fileupload",
+    }
+    assert unfurl_call["json"]["EntityRequests"][0]["QueryAnnotations"][0] == {
+        "Id": "SPO_YmNkNzI5MGUtOTA4Yi00ZmY0LTg2NGYtYjQ1MTk4MzM2NzdiLGY1ZGZmNmMwLWJlMjItNDc2MC05NTUxLWM5MzRkZjk4ZTAyYSxmYjJiYjk3NC04ZGM0LTQ1NDktYTdjMy0yMTUzNDQ5ZmE2YzE_01HOLHDXPIZMUAOANGN5H26X7S2SEXDZ6F",
+        "Type": "LocalFile",
+        "Text": "Welcome-to-Copilot-Chat.pdf",
+    }
+    assert uploaded.kind == "file"
+    assert uploaded.doc_id == (
+        "SPO_YmNkNzI5MGUtOTA4Yi00ZmY0LTg2NGYtYjQ1MTk4MzM2Nzdi"
+        "LGY1ZGZmNmMwLWJlMjItNDc2MC05NTUxLWM5MzRkZjk4ZTAyYS"
+        "xmYjJiYjk3NC04ZGM0LTQ1NDktYTdjMy0yMTUzNDQ5ZmE2YzE"
+        "_01HOLHDXPIZMUAOANGN5H26X7S2SEXDZ6F"
+    )
+    assert uploaded.file_name == "Welcome-to-Copilot-Chat.pdf"
+    assert uploaded.file_type == "pdf"
+    assert uploaded.uploaded_file_name == "Welcome-to-Copilot-Chat.pdf"
+    assert uploaded.logical_id is not None
+    assert uploaded.annotation_type == "LocalFile"
+    assert uploaded.annotation_text == "Welcome-to-Copilot-Chat.pdf"
+    assert uploaded.annotation_url == (
+        "https://pennstateoffice365-my.sharepoint.com/personal/tbz5156_psu_edu/"
+        "Documents/Microsoft%20Copilot%20Chat%20Files/Welcome-to-Copilot-Chat.pdf"
+    )
+
+
+def test_enterprise_file_upload_falls_back_to_access_token_without_search_token(monkeypatch) -> None:
+    client = build_enterprise_snapshot_client(search_access_token=None)
+    attachment = TranslatedImage(
+        kind="file",
+        filename="notes.txt",
+        mime_type="text/plain",
+        file_extension="txt",
+        data_url="data:text/plain;base64,aGVsbG8=",
+        content=b"hello",
+    )
+    captured: dict[str, object] = {"post_calls": []}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, files=None, headers=None, json=None):
+            captured["post_calls"].append(
+                {"url": url, "files": files, "headers": headers, "json": json}
+            )
+            request = httpx.Request("POST", url)
+            if "createUploadSession" in url:
+                return httpx.Response(
+                    200,
+                    request=request,
+                    json={"uploadUrl": "https://upload.example/fallback-session"},
+                )
+            return httpx.Response(200, request=request, json={"ApiVersion": "1.0"})
+
+        async def put(self, url, headers=None, content=None):
+            request = httpx.Request("PUT", url)
+            return httpx.Response(
+                201,
+                request=request,
+                json={
+                    "id": "fallback-item",
+                    "name": "notes.txt",
+                    "file": {"fileExtension": ".txt", "mimeType": "text/plain"},
+                    "parentReference": {
+                        "driveType": "business",
+                        "driveId": "b!DinXvIuQ9E-GT7RRmDNne8D23_UivmBHlVHJNN-Y4Cp0uSv7xI1JRafDIVNEn6bB",
+                    },
+                },
+            )
+
+    monkeypatch.setattr("m365_copilot_openai_proxy.substrate_client.httpx.AsyncClient", FakeAsyncClient)
+
+    asyncio.run(client._upload_image(attachment, conversation_id="conv-upload"))
+
+    unfurl_call = captured["post_calls"][1]
+    assert unfurl_call["headers"]["Authorization"] == f"Bearer {_TEST_JWT}"
+
+
+def test_personal_upload_image_uses_snapshot_anchor_mailbox(monkeypatch) -> None:
+    client = build_personal_client()
+    attachment = TranslatedImage(
+        kind="file",
+        filename="receipt.pdf",
+        mime_type="application/pdf",
+        file_extension="pdf",
+        data_url="data:application/pdf;base64,aGVsbG8=",
+        content=b"hello",
+    )
+    captured: dict[str, object] = {"post_calls": []}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, files=None, headers=None, json=None):
+            captured["post_calls"].append(
+                {"url": url, "files": files, "headers": headers, "json": json}
+            )
+            request = httpx.Request("POST", url)
+            if "createUploadSession" in url:
+                return httpx.Response(
+                    200,
+                    request=request,
+                    json={"uploadUrl": "https://upload.example/session"},
+                )
+            return httpx.Response(200, request=request, json={"ApiVersion": "1.0"})
+
+        async def put(self, url, headers=None, content=None):
+            captured["put"] = {"url": url, "headers": headers, "content": content}
+            request = httpx.Request("PUT", url)
+            return httpx.Response(
+                201,
+                request=request,
+                json={
+                    "id": "853E527A6BF3C11E!s45b7",
+                    "name": "receipt.pdf",
+                    "file": {"fileExtension": ".pdf", "mimeType": "application/pdf"},
+                    "parentReference": {"driveId": "853E527A6BF3C11E"},
+                },
+            )
+
+    monkeypatch.setattr("m365_copilot_openai_proxy.substrate_client.httpx.AsyncClient", FakeAsyncClient)
+
+    uploaded = asyncio.run(client._upload_image(attachment, conversation_id="86ac4933-eab7-44ea-aec5-5362e289f849"))
+
+    create_call = captured["post_calls"][0]
+    unfurl_call = captured["post_calls"][1]
+    assert create_call["url"] == (
+        "https://graph.microsoft.com/v1.0/me/drive/special/copilotuploads:/receipt.pdf:/createUploadSession"
+    )
+    assert create_call["json"] == {
+        "item": {"@microsoft.graph.conflictBehavior": "replace", "name": "receipt.pdf"}
+    }
+    assert captured["put"]["url"] == "https://upload.example/session"
+    assert captured["put"]["headers"]["Content-Range"] == "bytes 0-4/5"
+    assert captured["put"]["headers"]["Content-Type"] == "application/octet-stream"
+    assert captured["put"]["content"] == b"hello"
+    assert unfurl_call["url"] == "https://substrate.office.com/searchservice/api/v1/unfurl?domain=File"
+    assert unfurl_call["headers"]["x-anchormailbox"] == (
+        "Oid:00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
+    )
+    assert unfurl_call["headers"]["x-routingparameter-sessionkey"] == (
+        "Oid:00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
+    )
+    assert unfurl_call["headers"]["x-client-language"] == "en-us"
+    assert isinstance(unfurl_call["headers"]["client-request-id"], str)
+    assert isinstance(unfurl_call["headers"]["client-session-id"], str)
+    assert isinstance(unfurl_call["headers"]["x-client-localtime"], str)
+    assert unfurl_call["json"]["Scenario"]["Dimensions"][0] == {
+        "DimensionName": "ScenarioDescription",
+        "DimensionValue": "OfficeWebPremiumConsumerCopilot.prefetch.getdocumentsummary.fileupload",
+    }
+    assert unfurl_call["json"]["Cvid"] == "86ac4933-eab7-44ea-aec5-5362e289f849"
+    assert unfurl_call["json"]["EntityRequests"][0]["QueryAnnotations"][0] == {
+        "Id": "SPO_853E527A6BF3C11E_853E527A6BF3C11E!s45b7",
+        "Type": "LocalFile",
+        "Text": "receipt.pdf",
+    }
+    assert uploaded.kind == "file"
+    assert uploaded.doc_id == "SPO_853E527A6BF3C11E_853E527A6BF3C11E!s45b7"
+    assert uploaded.file_name == "receipt.pdf"
+    assert uploaded.file_type == "pdf"
+    assert uploaded.uploaded_file_name == "receipt.pdf"
+    assert uploaded.logical_id is not None
+    assert uploaded.annotation_type == "LocalFile"
+    assert uploaded.annotation_text == "receipt.pdf"
+    assert uploaded.annotation_url == (
+        "https://onedrive.live.com?cid=853E527A6BF3C11E&id=853E527A6BF3C11E!s45b7"
+    )

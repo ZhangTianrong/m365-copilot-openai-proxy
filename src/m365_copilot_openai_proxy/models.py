@@ -11,12 +11,26 @@ class ImageURLPart(BaseModel):
     url: str
 
 
+class FilePayloadPart(BaseModel):
+    model_config = ConfigDict(extra="ignore")
+
+    file_data: str | None = None
+    file_id: str | None = None
+    file_url: str | None = None
+    filename: str | None = None
+
+
 class ContentPart(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     type: str
     text: str | None = None
     image_url: str | ImageURLPart | None = None
+    file: FilePayloadPart | None = None
+    file_data: str | None = None
+    file_id: str | None = None
+    file_url: str | None = None
+    filename: str | None = None
 
 
 class OpenAIMessage(BaseModel):
@@ -78,7 +92,8 @@ class OpenAIResponsesRequest(BaseModel):
     stream: bool = False
 
 
-class TranslatedImage(BaseModel):
+class TranslatedAttachment(BaseModel):
+    kind: Literal["image", "file"] = "image"
     filename: str
     mime_type: str
     file_extension: str
@@ -86,11 +101,17 @@ class TranslatedImage(BaseModel):
     content: bytes
 
 
-class UploadedImage(BaseModel):
+class UploadedAttachment(BaseModel):
+    kind: Literal["image", "file"] = "image"
     doc_id: str
     file_name: str
     file_type: str
     uploaded_file_name: str | None = None
+    logical_id: str | None = None
+    entity_id: str | None = None
+    annotation_type: str | None = None
+    annotation_text: str | None = None
+    annotation_url: str | None = None
 
 
 class HistoryTurn(BaseModel):
@@ -101,7 +122,36 @@ class HistoryTurn(BaseModel):
 class TranslatedRequest(BaseModel):
     prompt: str
     additional_context: list[str] = Field(default_factory=list)
-    images: list[TranslatedImage] = Field(default_factory=list)
-    current_images: list[TranslatedImage] = Field(default_factory=list)
+    attachments: list[TranslatedAttachment] = Field(default_factory=list)
+    current_attachments: list[TranslatedAttachment] = Field(default_factory=list)
     system_text: str = ""
     prior_turns: list[HistoryTurn] = Field(default_factory=list)
+
+    @property
+    def images(self) -> list[TranslatedAttachment]:
+        return self.attachments
+
+    @property
+    def current_images(self) -> list[TranslatedAttachment]:
+        return self.current_attachments
+
+
+AccountMode = Literal["enterprise", "personal"]
+
+
+class AuthSessionSnapshot(BaseModel):
+    account_mode: AccountMode
+    access_token: str
+    expires_at: int | None = None
+    captured_at: int
+    oid: str
+    tid: str
+    websocket_url: str | None = None
+    graph_access_token: str | None = None
+    graph_expires_at: int | None = None
+    search_access_token: str | None = None
+    search_expires_at: int | None = None
+
+
+TranslatedImage = TranslatedAttachment
+UploadedImage = UploadedAttachment

@@ -115,6 +115,67 @@ def test_translate_responses_request_rejects_non_image_data_urls() -> None:
     assert translated.images == []
 
 
+def test_translate_openai_request_supports_data_url_files() -> None:
+    request = OpenAIChatRequest.model_validate(
+        {
+            "model": "ignored",
+            "messages": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "Summarize this file"},
+                        {
+                            "type": "file",
+                            "file": {
+                                "filename": "receipt.pdf",
+                                "file_data": "data:application/pdf;base64,aGVsbG8=",
+                            },
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    translated = translate_openai_request(request)
+
+    assert translated.prompt == "Summarize this file\n\nAttached files for this message: [File 1: receipt.pdf]"
+    assert len(translated.attachments) == 1
+    assert translated.attachments[0].kind == "file"
+    assert translated.attachments[0].filename == "receipt.pdf"
+    assert translated.attachments[0].mime_type == "application/pdf"
+    assert translated.attachments[0].content == b"hello"
+
+
+def test_translate_responses_request_supports_input_file_parts() -> None:
+    request = OpenAIResponsesRequest.model_validate(
+        {
+            "model": "ignored",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Read this"},
+                        {
+                            "type": "input_file",
+                            "filename": "notes.txt",
+                            "file_data": "data:text/plain;base64,aGVsbG8=",
+                        },
+                    ],
+                }
+            ],
+        }
+    )
+
+    translated = translate_responses_request(request)
+
+    assert translated.prompt == "Read this\n\nAttached files for this message: [File 1: notes.txt]"
+    assert len(translated.attachments) == 1
+    assert translated.attachments[0].kind == "file"
+    assert translated.attachments[0].filename == "notes.txt"
+    assert translated.attachments[0].file_extension == "txt"
+
+
 def test_prior_history_hash_excludes_current_final_user_turn() -> None:
     request = OpenAIChatRequest.model_validate(
         {

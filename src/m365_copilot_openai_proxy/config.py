@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Literal
+
 from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -13,6 +15,11 @@ class Settings(BaseSettings):
 
     access_token: str | None = Field(default=None, alias="M365_ACCESS_TOKEN")
     access_token_file: str = Field(default=".state/access_token.txt", alias="M365_ACCESS_TOKEN_FILE")
+    auth_state_file: str = Field(default=".state/auth_session.json", alias="M365_AUTH_STATE_FILE")
+    account_mode: Literal["enterprise", "personal"] = Field(
+        default="enterprise",
+        alias="M365_ACCOUNT_MODE",
+    )
     profile_dir: str = Field(default=".state/profile", alias="M365_PROFILE_DIR")
     debug_logging: bool = Field(default=False, alias="M365_DEBUG_LOGGING")
     enable_conversation_reuse: bool = Field(default=False, alias="M365_ENABLE_CONVERSATION_REUSE")

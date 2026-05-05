@@ -10,7 +10,7 @@ from hashlib import sha256
 from pathlib import Path
 
 from .config import Settings
-from .models import HistoryTurn, TranslatedImage, TranslatedRequest
+from .models import HistoryTurn, TranslatedAttachment, TranslatedRequest
 
 
 def _normalize_scope_user(scope_user: str | None) -> str:
@@ -58,7 +58,7 @@ class PreparedConversationTurn:
     routing_mode: str
     prompt: str
     additional_context: list[str]
-    images: list[TranslatedImage]
+    attachments: list[TranslatedAttachment]
     translated: TranslatedRequest
     scope_user: str | None
     reserved_conversation_id: str | None = None
@@ -222,7 +222,7 @@ class ConversationReuseService:
                 routing_mode="stateless_disabled",
                 prompt=translated.prompt,
                 additional_context=translated.additional_context,
-                images=translated.images,
+                attachments=translated.attachments,
                 translated=translated,
                 scope_user=scope_user,
             )
@@ -236,7 +236,7 @@ class ConversationReuseService:
                 routing_mode="stateless_miss",
                 prompt=translated.prompt,
                 additional_context=translated.additional_context,
-                images=translated.images,
+                attachments=translated.attachments,
                 translated=translated,
                 scope_user=scope_user,
             )
@@ -247,7 +247,7 @@ class ConversationReuseService:
             routing_mode="reused",
             prompt=translated.prompt,
             additional_context=[],
-            images=translated.current_images,
+            attachments=translated.current_attachments,
             translated=translated,
             scope_user=scope_user,
             reserved_conversation_id=reserved.conversation_id,
