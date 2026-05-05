@@ -115,7 +115,7 @@ def test_translate_responses_request_rejects_non_image_data_urls() -> None:
     assert translated.images == []
 
 
-def test_translate_openai_request_supports_data_url_files() -> None:
+def test_translate_openai_request_ignores_data_url_files() -> None:
     request = OpenAIChatRequest.model_validate(
         {
             "model": "ignored",
@@ -139,15 +139,11 @@ def test_translate_openai_request_supports_data_url_files() -> None:
 
     translated = translate_openai_request(request)
 
-    assert translated.prompt == "Summarize this file\n\nAttached files for this message: [File 1: receipt.pdf]"
-    assert len(translated.attachments) == 1
-    assert translated.attachments[0].kind == "file"
-    assert translated.attachments[0].filename == "receipt.pdf"
-    assert translated.attachments[0].mime_type == "application/pdf"
-    assert translated.attachments[0].content == b"hello"
+    assert translated.prompt == "Summarize this file"
+    assert translated.attachments == []
 
 
-def test_translate_responses_request_supports_input_file_parts() -> None:
+def test_translate_responses_request_ignores_input_file_parts() -> None:
     request = OpenAIResponsesRequest.model_validate(
         {
             "model": "ignored",
@@ -169,11 +165,8 @@ def test_translate_responses_request_supports_input_file_parts() -> None:
 
     translated = translate_responses_request(request)
 
-    assert translated.prompt == "Read this\n\nAttached files for this message: [File 1: notes.txt]"
-    assert len(translated.attachments) == 1
-    assert translated.attachments[0].kind == "file"
-    assert translated.attachments[0].filename == "notes.txt"
-    assert translated.attachments[0].file_extension == "txt"
+    assert translated.prompt == "Read this"
+    assert translated.attachments == []
 
 
 def test_prior_history_hash_excludes_current_final_user_turn() -> None:

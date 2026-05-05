@@ -448,14 +448,25 @@ def test_enterprise_file_upload_falls_back_to_access_token_without_search_token(
 def test_personal_upload_image_uses_snapshot_anchor_mailbox(monkeypatch) -> None:
     client = build_personal_client()
     attachment = TranslatedImage(
-        kind="file",
-        filename="receipt.pdf",
-        mime_type="application/pdf",
-        file_extension="pdf",
-        data_url="data:application/pdf;base64,aGVsbG8=",
+        filename="image.png",
+        mime_type="image/png",
+        file_extension="png",
+        data_url="data:image/png;base64,aGVsbG8=",
         content=b"hello",
     )
     captured: dict[str, object] = {"post_calls": []}
+
+    monkeypatch.setattr(
+        "m365_copilot_openai_proxy.substrate_client._convert_image_attachment_to_pdf",
+        lambda image: TranslatedImage(
+            kind="image",
+            filename="image.pdf",
+            mime_type="application/pdf",
+            file_extension="pdf",
+            data_url="data:application/pdf;base64,cGRm",
+            content=b"pdf",
+        ),
+    )
 
     class FakeAsyncClient:
         def __init__(self, *args, **kwargs):
@@ -488,7 +499,7 @@ def test_personal_upload_image_uses_snapshot_anchor_mailbox(monkeypatch) -> None
                 request=request,
                 json={
                     "id": "853E527A6BF3C11E!s45b7",
-                    "name": "receipt.pdf",
+                    "name": "image.pdf",
                     "file": {"fileExtension": ".pdf", "mimeType": "application/pdf"},
                     "parentReference": {"driveId": "853E527A6BF3C11E"},
                 },
@@ -501,15 +512,15 @@ def test_personal_upload_image_uses_snapshot_anchor_mailbox(monkeypatch) -> None
     create_call = captured["post_calls"][0]
     unfurl_call = captured["post_calls"][1]
     assert create_call["url"] == (
-        "https://graph.microsoft.com/v1.0/me/drive/special/copilotuploads:/receipt.pdf:/createUploadSession"
+        "https://graph.microsoft.com/v1.0/me/drive/special/copilotuploads:/image.pdf:/createUploadSession"
     )
     assert create_call["json"] == {
-        "item": {"@microsoft.graph.conflictBehavior": "replace", "name": "receipt.pdf"}
+        "item": {"@microsoft.graph.conflictBehavior": "replace", "name": "image.pdf"}
     }
     assert captured["put"]["url"] == "https://upload.example/session"
-    assert captured["put"]["headers"]["Content-Range"] == "bytes 0-4/5"
+    assert captured["put"]["headers"]["Content-Range"] == "bytes 0-2/3"
     assert captured["put"]["headers"]["Content-Type"] == "application/octet-stream"
-    assert captured["put"]["content"] == b"hello"
+    assert captured["put"]["content"] == b"pdf"
     assert unfurl_call["url"] == "https://substrate.office.com/searchservice/api/v1/unfurl?domain=File"
     assert unfurl_call["headers"]["x-anchormailbox"] == (
         "Oid:00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
@@ -529,16 +540,16 @@ def test_personal_upload_image_uses_snapshot_anchor_mailbox(monkeypatch) -> None
     assert unfurl_call["json"]["EntityRequests"][0]["QueryAnnotations"][0] == {
         "Id": "SPO_853E527A6BF3C11E_853E527A6BF3C11E!s45b7",
         "Type": "LocalFile",
-        "Text": "receipt.pdf",
+        "Text": "image.pdf",
     }
-    assert uploaded.kind == "file"
+    assert uploaded.kind == "image"
     assert uploaded.doc_id == "SPO_853E527A6BF3C11E_853E527A6BF3C11E!s45b7"
-    assert uploaded.file_name == "receipt.pdf"
+    assert uploaded.file_name == "image.pdf"
     assert uploaded.file_type == "pdf"
-    assert uploaded.uploaded_file_name == "receipt.pdf"
+    assert uploaded.uploaded_file_name == "image.pdf"
     assert uploaded.logical_id is not None
     assert uploaded.annotation_type == "LocalFile"
-    assert uploaded.annotation_text == "receipt.pdf"
+    assert uploaded.annotation_text == "image.pdf"
     assert uploaded.annotation_url == (
         "https://onedrive.live.com?cid=853E527A6BF3C11E&id=853E527A6BF3C11E!s45b7"
     )

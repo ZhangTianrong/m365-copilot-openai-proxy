@@ -5,8 +5,8 @@ import time
 import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
-from urllib.parse import quote
 import base64
+from urllib.parse import quote
 from uuid import UUID
 
 import httpx
@@ -435,6 +435,7 @@ class SubstrateCopilotClient:
                 conversation_id=chat_conversation_id,
             )
         if self._auth_session.account_mode == "personal":
+            attachment = _convert_image_attachment_to_pdf(attachment)
             return await self._upload_graph_file_attachment(
                 attachment,
                 conversation_id=chat_conversation_id,
@@ -653,6 +654,34 @@ def _graph_file_annotation_url(
     if drive_type == "business":
         return uploaded_file_url
     return f"https://onedrive.live.com?cid={drive_id}&id={drive_item_id}"
+
+
+def _convert_image_attachment_to_pdf(attachment: TranslatedAttachment) -> TranslatedAttachment:
+    if attachment.kind != "image":
+        return attachment
+    try:
+        import img2pdf
+    except ImportError as exc:
+        raise SubstrateCopilotError(
+            "Personal image uploads require the `img2pdf` package. Reinstall the project dependencies."
+        ) from exc
+
+    try:
+        pdf_content = img2pdf.convert(attachment.content)
+    except Exception as exc:
+        raise SubstrateCopilotError(f"Personal image-to-PDF conversion failed: {exc}") from exc
+
+    stem, _separator, _suffix = attachment.filename.rpartition(".")
+    pdf_filename = f"{stem or attachment.filename}.pdf"
+    pdf_data_url = "data:application/pdf;base64," + base64.b64encode(pdf_content).decode("ascii")
+    return TranslatedAttachment(
+        kind="image",
+        filename=pdf_filename,
+        mime_type="application/pdf",
+        file_extension="pdf",
+        data_url=pdf_data_url,
+        content=pdf_content,
+    )
 
 
 def _decode_business_drive_id(drive_id: str) -> tuple[str, str, str]:

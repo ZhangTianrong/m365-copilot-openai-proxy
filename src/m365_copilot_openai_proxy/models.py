@@ -11,26 +11,12 @@ class ImageURLPart(BaseModel):
     url: str
 
 
-class FilePayloadPart(BaseModel):
-    model_config = ConfigDict(extra="ignore")
-
-    file_data: str | None = None
-    file_id: str | None = None
-    file_url: str | None = None
-    filename: str | None = None
-
-
 class ContentPart(BaseModel):
     model_config = ConfigDict(extra="ignore")
 
     type: str
     text: str | None = None
     image_url: str | ImageURLPart | None = None
-    file: FilePayloadPart | None = None
-    file_data: str | None = None
-    file_id: str | None = None
-    file_url: str | None = None
-    filename: str | None = None
 
 
 class OpenAIMessage(BaseModel):

@@ -285,7 +285,7 @@ def test_openai_responses_support_data_url_images(tmp_path) -> None:
     assert images[0].file_extension == "webp"
 
 
-def test_openai_chat_completion_supports_data_url_files(tmp_path) -> None:
+def test_openai_chat_completion_ignores_data_url_files(tmp_path) -> None:
     fake = FakeCopilotClient()
     client = build_client(fake, tmp_path)
     response = client.post(
@@ -311,16 +311,11 @@ def test_openai_chat_completion_supports_data_url_files(tmp_path) -> None:
     )
     assert response.status_code == 200
     call = fake.calls[0]
-    assert call["prompt"] == (
-        "Summarize this attachment\n\nAttached files for this message: [File 1: receipt.pdf]"
-    )
-    assert len(call["images"]) == 1
-    assert call["images"][0].kind == "file"
-    assert call["images"][0].filename == "receipt.pdf"
-    assert call["images"][0].file_extension == "pdf"
+    assert call["prompt"] == "Summarize this attachment"
+    assert call["images"] == []
 
 
-def test_openai_responses_support_data_url_files(tmp_path) -> None:
+def test_openai_responses_ignore_data_url_files(tmp_path) -> None:
     fake = FakeCopilotClient()
     client = build_client(fake, tmp_path)
     response = client.post(
@@ -344,11 +339,8 @@ def test_openai_responses_support_data_url_files(tmp_path) -> None:
     )
     assert response.status_code == 200
     call = fake.calls[0]
-    assert call["prompt"] == "Read this file\n\nAttached files for this message: [File 1: notes.txt]"
-    assert len(call["images"]) == 1
-    assert call["images"][0].kind == "file"
-    assert call["images"][0].filename == "notes.txt"
-    assert call["images"][0].file_extension == "txt"
+    assert call["prompt"] == "Read this file"
+    assert call["images"] == []
 
 
 def test_anthropic_messages_drop_images(tmp_path) -> None:
@@ -562,7 +554,7 @@ def test_debug_logging_reports_request_and_sanitized_images(tmp_path, caplog) ->
     log_text = "\n".join(caplog.messages)
     assert '"event": "request.received"' in log_text
     assert '"messages"' in log_text
-    assert '"type": "data_url_image"' in log_text
+    assert '"type": "data_url"' in log_text
     assert '"event": "turn.prepared"' in log_text
     assert '"routing_mode": "stateless_disabled"' in log_text
 

@@ -324,11 +324,11 @@ def _truncate_debug_string(value: str, limit: int = 500) -> str:
 
 def _sanitize_debug_value(value: Any) -> Any:
     if isinstance(value, str):
-        if value.startswith("data:image/") and ";base64," in value:
+        if value.startswith("data:") and ";base64," in value:
             prefix, encoded = value.split(",", 1)
             mime_type = prefix[5:].split(";", 1)[0]
             return {
-                "type": "data_url_image",
+                "type": "data_url",
                 "mime_type": mime_type,
                 "base64_length": len(encoded),
             }
