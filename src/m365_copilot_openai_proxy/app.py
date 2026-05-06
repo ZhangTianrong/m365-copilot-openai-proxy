@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import json
 import logging
-import sys
 import time
 import uuid
 from collections.abc import AsyncIterator, Callable
@@ -12,7 +11,12 @@ from fastapi import Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse, StreamingResponse
 
 from .copilot_models import resolve_copilot_model_transport
-from .conversation_reuse import ConversationReuseService, PreparedConversationTurn
+from .conversation_reuse import (
+    ConversationReuseService,
+    PreparedConversationTurn,
+    compute_advanced_history_hash,
+    compute_prior_history_hash,
+)
 from .config import Settings
 from .substrate_client import (
     SubstrateCopilotClient,
@@ -44,7 +48,7 @@ def _ensure_debug_handler() -> None:
     for handler in logger.handlers:
         if getattr(handler, "_m365_debug_handler", False):
             return
-    handler = logging.StreamHandler(sys.stderr)
+    handler = logging.StreamHandler()
     handler.setLevel(logging.INFO)
     handler.setFormatter(logging.Formatter("%(levelname)s:%(name)s:%(message)s"))
     setattr(handler, "_m365_debug_handler", True)
@@ -163,6 +167,12 @@ def create_app(
                 endpoint="chat.completions",
                 conversation_id=turn.conversation_id,
                 routing_mode=turn.routing_mode,
+                resolved_conversation_id=transport_state.conversation_id or turn.conversation_id,
+                prior_history_hash=compute_prior_history_hash(turn.translated),
+                advanced_history_hash=compute_advanced_history_hash(
+                    turn.translated,
+                    assistant.history_text,
+                ),
                 assistant_preview=_sanitize_debug_value(text),
                 assistant_length=len(text),
                 public_model=profile.public_model_id,
@@ -247,6 +257,12 @@ def create_app(
                 endpoint="responses",
                 conversation_id=turn.conversation_id,
                 routing_mode=turn.routing_mode,
+                resolved_conversation_id=transport_state.conversation_id or turn.conversation_id,
+                prior_history_hash=compute_prior_history_hash(turn.translated),
+                advanced_history_hash=compute_advanced_history_hash(
+                    turn.translated,
+                    assistant.history_text,
+                ),
                 assistant_preview=_sanitize_debug_value(text),
                 assistant_length=len(text),
                 public_model=profile.public_model_id,
@@ -318,6 +334,9 @@ def create_app(
                 endpoint="messages",
                 conversation_id=turn.conversation_id,
                 routing_mode=turn.routing_mode,
+                resolved_conversation_id=transport_state.conversation_id or turn.conversation_id,
+                prior_history_hash=compute_prior_history_hash(turn.translated),
+                advanced_history_hash=compute_advanced_history_hash(turn.translated, text),
                 assistant_preview=_sanitize_debug_value(text),
                 assistant_length=len(text),
             )
@@ -429,7 +448,9 @@ def _log_translation_debug(
         is_start_of_session=turn.is_start_of_session,
         routing_mode=turn.routing_mode,
         reuse_enabled=turn.routing_mode != "stateless_disabled",
+        prior_history_hash=compute_prior_history_hash(translated),
         prompt=_sanitize_debug_value(translated.prompt),
+        prompt_role=translated.prompt_role,
         additional_context=_sanitize_debug_value(translated.additional_context),
         transport_additional_context=_sanitize_debug_value(
             translated.transport_additional_context
@@ -533,6 +554,12 @@ async def _openai_stream(
                 endpoint="chat.completions",
                 conversation_id=turn.conversation_id,
                 routing_mode=turn.routing_mode,
+                resolved_conversation_id=transport_state.conversation_id or turn.conversation_id,
+                prior_history_hash=compute_prior_history_hash(turn.translated),
+                advanced_history_hash=compute_advanced_history_hash(
+                    turn.translated,
+                    assistant.history_text,
+                ),
                 assistant_preview=_sanitize_debug_value(full_text),
                 assistant_length=len(full_text),
                 public_model=profile.public_model_id,
@@ -599,6 +626,9 @@ async def _openai_stream(
         endpoint="chat.completions",
         conversation_id=turn.conversation_id,
         routing_mode=turn.routing_mode,
+        resolved_conversation_id=transport_state.conversation_id or turn.conversation_id,
+        prior_history_hash=compute_prior_history_hash(turn.translated),
+        advanced_history_hash=compute_advanced_history_hash(turn.translated, full_text),
         assistant_preview=_sanitize_debug_value(full_text),
         assistant_length=len(full_text),
         public_model=profile.public_model_id,
@@ -649,6 +679,12 @@ async def _responses_stream(
                 endpoint="responses",
                 conversation_id=turn.conversation_id,
                 routing_mode=turn.routing_mode,
+                resolved_conversation_id=transport_state.conversation_id or turn.conversation_id,
+                prior_history_hash=compute_prior_history_hash(turn.translated),
+                advanced_history_hash=compute_advanced_history_hash(
+                    turn.translated,
+                    assistant.history_text,
+                ),
                 assistant_preview=_sanitize_debug_value(full_text),
                 assistant_length=len(full_text),
                 public_model=profile.public_model_id,
@@ -698,6 +734,9 @@ async def _responses_stream(
         endpoint="responses",
         conversation_id=turn.conversation_id,
         routing_mode=turn.routing_mode,
+        resolved_conversation_id=transport_state.conversation_id or turn.conversation_id,
+        prior_history_hash=compute_prior_history_hash(turn.translated),
+        advanced_history_hash=compute_advanced_history_hash(turn.translated, full_text),
         assistant_preview=_sanitize_debug_value(full_text),
         assistant_length=len(full_text),
         public_model=profile.public_model_id,
@@ -761,6 +800,9 @@ async def _anthropic_stream(
         endpoint="messages",
         conversation_id=turn.conversation_id,
         routing_mode=turn.routing_mode,
+        resolved_conversation_id=transport_state.conversation_id or turn.conversation_id,
+        prior_history_hash=compute_prior_history_hash(turn.translated),
+        advanced_history_hash=compute_advanced_history_hash(turn.translated, full_text),
         assistant_preview=_sanitize_debug_value(full_text),
         assistant_length=len(full_text),
     )

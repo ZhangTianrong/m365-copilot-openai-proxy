@@ -869,6 +869,7 @@ def test_debug_logging_reports_reuse_hits(tmp_path, caplog) -> None:
     assert '"event": "turn.prepared"' in log_text
     assert '"routing_mode": "reused"' in log_text
     assert '"is_start_of_session": false' in log_text
+    assert '"prior_history_hash"' in log_text
 
 
 def test_invalid_copilot_model_name_warns_and_falls_back(tmp_path, caplog) -> None:

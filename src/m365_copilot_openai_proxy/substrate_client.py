@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import time
 import uuid
 from collections.abc import AsyncIterator
@@ -20,6 +21,8 @@ from .models import (
     UploadedAttachment,
 )
 from .token_store import build_enterprise_auth_session
+
+logger = logging.getLogger(__name__)
 
 SIGNALR_SEP = "\x1e"
 _WS_BASE = "wss://substrate.office.com/m365Copilot/Chathub"
@@ -563,85 +566,101 @@ class SubstrateCopilotClient:
         text = _combine_text(prompt, additional_context)
         conv_id = conversation_id
         session_id = transport_session_id or str(uuid.uuid4())
-        req_id = str(uuid.uuid4())
-        url = self._ws_url(
-            conv_id,
-            session_id,
-            req_id,
-            is_start_of_session=is_start_of_session,
-        )
         if transport_state is not None:
             transport_state.session_id = session_id
         uploaded_attachments = await self._upload_attachments(
             attachments or [],
             chat_conversation_id=conv_id,
         )
-        try:
-            async with websockets.connect(
-                url,
-                additional_headers={
-                    "Origin": "https://m365.cloud.microsoft",
-                },
-            ) as ws:
-                await ws.send(json.dumps({"protocol": "json", "version": 1}) + SIGNALR_SEP)
-                await ws.recv()
-                await ws.send(
-                    self._chat_invoke(
-                        text,
-                        conv_id,
-                        session_id,
-                        req_id,
-                        uploaded_attachments,
-                        is_start_of_session=is_start_of_session,
+        max_attempts = 2 if self._auth_session.account_mode == "personal" and is_start_of_session else 1
+        last_exc: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            req_id = str(uuid.uuid4())
+            url = self._ws_url(
+                conv_id,
+                session_id,
+                req_id,
+                is_start_of_session=is_start_of_session,
+            )
+            try:
+                async with websockets.connect(
+                    url,
+                    additional_headers={
+                        "Origin": "https://m365.cloud.microsoft",
+                    },
+                    open_timeout=30,
+                ) as ws:
+                    await ws.send(json.dumps({"protocol": "json", "version": 1}) + SIGNALR_SEP)
+                    await ws.recv()
+                    await ws.send(
+                        self._chat_invoke(
+                            text,
+                            conv_id,
+                            session_id,
+                            req_id,
+                            uploaded_attachments,
+                            is_start_of_session=is_start_of_session,
+                        )
                     )
-                )
-                fallback_text = ""
-                yielded_any = False
-                async for raw in ws:
-                    for part in raw.split(SIGNALR_SEP):
-                        part = part.strip()
-                        if not part:
-                            continue
-                        try:
-                            msg = json.loads(part)
-                        except json.JSONDecodeError:
-                            continue
-                        if transport_state is not None:
-                            resolved_conversation_id = _extract_conversation_id(msg)
-                            if resolved_conversation_id:
-                                transport_state.conversation_id = resolved_conversation_id
-                        t = msg.get("type")
-                        if t == 6:
-                            continue
-                        if t == 1 and msg.get("target") == "update":
-                            args = (msg.get("arguments") or [{}])[0]
-                            delta = args.get("writeAtCursor")
-                            if delta:
-                                if not yielded_any and fallback_text:
-                                    yield fallback_text
-                                yielded_any = True
-                                yield delta
-                            msgs = args.get("messages")
-                            if msgs:
-                                entries = msgs if isinstance(msgs, list) else [msgs]
-                                for entry in reversed(entries):
+                    fallback_text = ""
+                    yielded_any = False
+                    async for raw in ws:
+                        for part in raw.split(SIGNALR_SEP):
+                            part = part.strip()
+                            if not part:
+                                continue
+                            try:
+                                msg = json.loads(part)
+                            except json.JSONDecodeError:
+                                continue
+                            if transport_state is not None:
+                                resolved_conversation_id = _extract_conversation_id(msg)
+                                if resolved_conversation_id:
+                                    transport_state.conversation_id = resolved_conversation_id
+                            t = msg.get("type")
+                            if t == 6:
+                                continue
+                            if t == 1 and msg.get("target") == "update":
+                                args = (msg.get("arguments") or [{}])[0]
+                                delta = args.get("writeAtCursor")
+                                if delta:
+                                    if not yielded_any and fallback_text:
+                                        yield fallback_text
+                                    yielded_any = True
+                                    yield delta
+                                msgs = args.get("messages")
+                                if msgs:
+                                    entries = msgs if isinstance(msgs, list) else [msgs]
+                                    for entry in reversed(entries):
+                                        if entry.get("author") != "user":
+                                            fallback_text = entry.get("text", "")
+                                            break
+                            if t == 2:
+                                item_msgs = (msg.get("item") or {}).get("messages") or []
+                                for entry in reversed(item_msgs):
                                     if entry.get("author") != "user":
                                         fallback_text = entry.get("text", "")
                                         break
-                        if t == 2:
-                            item_msgs = (msg.get("item") or {}).get("messages") or []
-                            for entry in reversed(item_msgs):
-                                if entry.get("author") != "user":
-                                    fallback_text = entry.get("text", "")
-                                    break
-                        if t == 3:
-                            if not yielded_any and fallback_text:
-                                yield fallback_text
-                            return
-        except SubstrateCopilotError:
-            raise
-        except Exception as exc:
-            raise SubstrateCopilotError(str(exc)) from exc
+                            if t == 3:
+                                if not yielded_any and fallback_text:
+                                    yield fallback_text
+                                return
+            except SubstrateCopilotError:
+                raise
+            except Exception as exc:
+                last_exc = exc
+                if attempt < max_attempts and _is_retryable_personal_handshake_error(exc):
+                    logger.warning(
+                        "Retrying personal Copilot websocket handshake after attempt %s/%s failed: %s",
+                        attempt,
+                        max_attempts,
+                        exc,
+                    )
+                    continue
+                raise SubstrateCopilotError(str(exc)) from exc
+        if last_exc is not None:
+            raise SubstrateCopilotError(str(last_exc)) from last_exc
+        raise SubstrateCopilotError("Copilot websocket connection failed without an error.")
 
     async def chat(
         self,
@@ -691,6 +710,11 @@ def _extract_conversation_id(value: object) -> str | None:
             if resolved:
                 return resolved
     return None
+
+
+def _is_retryable_personal_handshake_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "timed out during handshake" in message or isinstance(exc, TimeoutError)
 
 
 def _message_annotation_type(attachment: UploadedAttachment) -> str:

@@ -49,7 +49,7 @@ class StructuredToolCall(BaseModel):
 
     def canonical_dict(self) -> dict[str, str]:
         return {
-            "arguments": self.arguments,
+            "arguments": _canonicalize_json_like_string(self.arguments),
             "call_id": self.call_id,
             "name": self.name,
             "type": "function_call",
@@ -164,8 +164,7 @@ def canonicalize_tool_output(
 ) -> str:
     payload = _canonical_json(
         {
-            "content": content.strip(),
-            "name": name or "",
+            "content": _canonicalize_json_like_string(content),
             "tool_call_id": tool_call_id or "",
             "type": "function_call_output",
         }
@@ -258,6 +257,17 @@ def _try_parse_tool_call_array(candidate_text: str) -> list[StructuredToolCall] 
     if end != len(normalized_candidate):
         return None
     return tool_calls
+
+
+def _canonicalize_json_like_string(value: str) -> str:
+    stripped = value.strip()
+    if not stripped:
+        return ""
+    try:
+        parsed = json.loads(stripped)
+    except JSONDecodeError:
+        return stripped
+    return _canonical_json(parsed)
 
 
 def _canonical_json(value: object) -> str:

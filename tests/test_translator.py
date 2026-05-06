@@ -376,6 +376,67 @@ def test_chat_and_responses_tool_history_normalize_to_same_hash() -> None:
     assert compute_prior_history_hash(translated_chat) == compute_prior_history_hash(translated_responses)
 
 
+def test_tool_history_hash_tolerates_argument_formatting_and_missing_tool_output_name() -> None:
+    first_request = OpenAIResponsesRequest.model_validate(
+        {
+            "model": "m365-minis",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "Earlier"}]},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "我来调用终端。"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "shell_execute",
+                    "arguments": '{"b":2,"a":1}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "name": "shell_execute",
+                    "output": '{ "ok": true, "value": 1 }',
+                },
+                {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]},
+            ],
+        }
+    )
+    second_request = OpenAIResponsesRequest.model_validate(
+        {
+            "model": "m365-minis",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "Earlier"}]},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "我来调用终端。"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "shell_execute",
+                    "arguments": '{ "a": 1, "b": 2 }',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "output": '{"value":1,"ok":true}',
+                },
+                {"role": "user", "content": [{"type": "input_text", "text": "Continue"}]},
+            ],
+        }
+    )
+
+    translated_first = translate_responses_request(first_request)
+    translated_second = translate_responses_request(second_request)
+
+    assert translated_first.prior_turns == translated_second.prior_turns
+    assert translated_first.prompt == translated_second.prompt
+    assert compute_prior_history_hash(translated_first) == compute_prior_history_hash(translated_second)
+
+
 def test_translate_responses_request_allows_final_function_call_output() -> None:
     request = OpenAIResponsesRequest.model_validate(
         {

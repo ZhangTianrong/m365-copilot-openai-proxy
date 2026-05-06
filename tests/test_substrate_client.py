@@ -379,7 +379,7 @@ def test_personal_chat_stream_extracts_remote_conversation_id(monkeypatch) -> No
 
             return generator()
 
-    def fake_connect(url, additional_headers=None):
+    def fake_connect(url, additional_headers=None, open_timeout=None):
         captured_url["url"] = url
         return FakeWebSocket()
 
@@ -406,6 +406,69 @@ def test_personal_chat_stream_extracts_remote_conversation_id(monkeypatch) -> No
     assert transport_state.conversation_id == "remote-conv-1"
     assert transport_state.session_id == "session-1"
     assert "X-SessionId=session-1" in captured_url["url"]
+
+
+def test_personal_chat_stream_retries_handshake_timeout_once(monkeypatch) -> None:
+    client = build_personal_client()
+    attempts = {"count": 0}
+
+    class FakeWebSocket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, data):
+            return None
+
+        async def recv(self):
+            return "{}" + SIGNALR_SEP
+
+        def __aiter__(self):
+            async def generator():
+                yield json.dumps(
+                    {
+                        "type": 2,
+                        "item": {
+                            "conversationId": "remote-conv-2",
+                            "messages": [{"author": "assistant", "text": "retried"}],
+                        },
+                    }
+                ) + SIGNALR_SEP
+                yield json.dumps({"type": 3}) + SIGNALR_SEP
+
+            return generator()
+
+    def fake_connect(url, additional_headers=None, open_timeout=None):
+        attempts["count"] += 1
+        if attempts["count"] == 1:
+            raise TimeoutError("timed out during handshake")
+        return FakeWebSocket()
+
+    monkeypatch.setattr("m365_copilot_openai_proxy.substrate_client.websockets.connect", fake_connect)
+
+    async def fake_upload_attachments(attachments, *, chat_conversation_id):
+        return []
+
+    monkeypatch.setattr(client, "_upload_attachments", fake_upload_attachments)
+
+    transport_state = ConversationTransportState()
+    text = asyncio.run(
+        client.chat(
+            "hello",
+            [],
+            [],
+            conversation_id="local-placeholder",
+            transport_session_id="session-1",
+            is_start_of_session=True,
+            transport_state=transport_state,
+        )
+    )
+
+    assert text == "retried"
+    assert attempts["count"] == 2
+    assert transport_state.conversation_id == "remote-conv-2"
 
 
 def test_upload_image_uses_expected_headers_and_form_fields(monkeypatch) -> None:
