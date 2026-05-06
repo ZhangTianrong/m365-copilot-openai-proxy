@@ -183,14 +183,24 @@ def inject_minis_system_prompt(translated: TranslatedRequest) -> TranslatedReque
 
 def postprocess_assistant_text(raw_text: str) -> AssistantPostprocessResult:
     stripped = raw_text.rstrip()
+    fenced_candidate = _extract_fenced_json_candidate(stripped)
+    if fenced_candidate is not None:
+        visible_text, candidate_text = fenced_candidate
+        tool_calls = _try_parse_tool_call_array(candidate_text)
+        if tool_calls is not None:
+            return AssistantPostprocessResult(
+                raw_text=raw_text,
+                visible_text=visible_text,
+                history_text=canonicalize_assistant_turn(visible_text, tool_calls),
+                tool_calls=tuple(tool_calls),
+            )
     for index in range(len(stripped) - 1, -1, -1):
         if stripped[index] != "[":
             continue
-        try:
-            candidate, end = _JSON_DECODER.raw_decode(stripped[index:])
-            tool_calls = StructuredToolCall.validate_list(candidate)
-        except (JSONDecodeError, ValidationError, ValueError):
+        tool_calls = _try_parse_tool_call_array(stripped[index:])
+        if tool_calls is None:
             continue
+        candidate, end = _JSON_DECODER.raw_decode(stripped[index:])
         if index + end != len(stripped):
             continue
         visible_text = stripped[:index].rstrip()
@@ -206,6 +216,31 @@ def postprocess_assistant_text(raw_text: str) -> AssistantPostprocessResult:
         history_text=canonicalize_assistant_turn(raw_text),
         tool_calls=(),
     )
+
+
+def _extract_fenced_json_candidate(text: str) -> tuple[str, str] | None:
+    suffix = text
+    for fence_prefix in ("```json", "```JSON", "```"):
+        if not suffix.endswith("```"):
+            continue
+        start = suffix.rfind(fence_prefix)
+        if start < 0:
+            continue
+        candidate = suffix[start + len(fence_prefix): -3].strip()
+        visible_text = suffix[:start].rstrip()
+        return visible_text, candidate
+    return None
+
+
+def _try_parse_tool_call_array(candidate_text: str) -> list[StructuredToolCall] | None:
+    try:
+        candidate, end = _JSON_DECODER.raw_decode(candidate_text)
+        tool_calls = StructuredToolCall.validate_list(candidate)
+    except (JSONDecodeError, ValidationError, ValueError):
+        return None
+    if end != len(candidate_text):
+        return None
+    return tool_calls
 
 
 def _canonical_json(value: object) -> str:

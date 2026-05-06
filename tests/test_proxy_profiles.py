@@ -48,3 +48,16 @@ def test_postprocess_ignores_malformed_trailing_array() -> None:
 
     assert result.visible_text == text
     assert result.tool_calls == ()
+
+
+def test_postprocess_extracts_fenced_json_tool_call_block() -> None:
+    text = (
+        "先解释一下。\n\n```json\n"
+        '[{"type":"function_call","call_id":"call_1","name":"shell_execute","arguments":"{}"}]\n'
+        "```"
+    )
+    result = postprocess_assistant_text(text)
+
+    assert result.visible_text == "先解释一下。"
+    assert len(result.tool_calls) == 1
+    assert result.tool_calls[0].name == "shell_execute"
