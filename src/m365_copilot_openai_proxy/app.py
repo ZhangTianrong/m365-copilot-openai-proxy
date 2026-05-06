@@ -629,7 +629,14 @@ async def _responses_stream(
                 if item["type"] == "message":
                     part = item["content"][0]
                     yield f"data: {json.dumps({'type': 'response.content_part.added', 'item_id': item['id'], 'output_index': output_index, 'content_index': 0, 'part': part})}\n\n"
+                    yield f"data: {json.dumps({'type': 'response.output_text.delta', 'item_id': item['id'], 'output_index': output_index, 'content_index': 0, 'delta': part['text']})}\n\n"
                     yield f"data: {json.dumps({'type': 'response.output_text.done', 'item_id': item['id'], 'output_index': output_index, 'content_index': 0, 'text': part['text']})}\n\n"
+                    yield f"data: {json.dumps({'type': 'response.output_item.done', 'output_index': output_index, 'item': item})}\n\n"
+                elif item["type"] == "function_call":
+                    item_id = item["id"]
+                    yield f"data: {json.dumps({'type': 'response.function_call_arguments.delta', 'item_id': item_id, 'output_index': output_index, 'delta': item['arguments']})}\n\n"
+                    yield f"data: {json.dumps({'type': 'response.function_call_arguments.done', 'item_id': item_id, 'output_index': output_index, 'arguments': item['arguments']})}\n\n"
+                    yield f"data: {json.dumps({'type': 'response.output_item.done', 'output_index': output_index, 'item': item})}\n\n"
             conversation_reuse.complete_turn(
                 turn,
                 assistant.history_text,

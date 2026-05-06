@@ -69,7 +69,10 @@ class StructuredToolCall(BaseModel):
         return payload
 
     def to_responses_item(self) -> dict[str, str]:
-        return self.canonical_dict()
+        return {
+            "id": f"fc_{self.call_id}",
+            **self.canonical_dict(),
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -197,11 +200,12 @@ def postprocess_assistant_text(raw_text: str) -> AssistantPostprocessResult:
     for index in range(len(stripped) - 1, -1, -1):
         if stripped[index] != "[":
             continue
-        tool_calls = _try_parse_tool_call_array(stripped[index:])
+        candidate_text = stripped[index:]
+        tool_calls = _try_parse_tool_call_array(candidate_text)
         if tool_calls is None:
             continue
-        candidate, end = _JSON_DECODER.raw_decode(stripped[index:])
-        if index + end != len(stripped):
+        normalized_candidate = candidate_text.strip()
+        if normalized_candidate.endswith("]") and index + len(normalized_candidate) != len(stripped):
             continue
         visible_text = stripped[:index].rstrip()
         return AssistantPostprocessResult(
@@ -233,12 +237,25 @@ def _extract_fenced_json_candidate(text: str) -> tuple[str, str] | None:
 
 
 def _try_parse_tool_call_array(candidate_text: str) -> list[StructuredToolCall] | None:
+    normalized_candidate = candidate_text.strip()
     try:
-        candidate, end = _JSON_DECODER.raw_decode(candidate_text)
+        candidate, end = _JSON_DECODER.raw_decode(normalized_candidate)
         tool_calls = StructuredToolCall.validate_list(candidate)
     except (JSONDecodeError, ValidationError, ValueError):
-        return None
-    if end != len(candidate_text):
+        if not normalized_candidate.startswith("[") or normalized_candidate.endswith("]"):
+            return None
+        if not normalized_candidate.endswith("}"):
+            return None
+        try:
+            repaired_candidate = f"{normalized_candidate}]"
+            candidate, end = _JSON_DECODER.raw_decode(repaired_candidate)
+            tool_calls = StructuredToolCall.validate_list(candidate)
+        except (JSONDecodeError, ValidationError, ValueError):
+            return None
+        if end != len(repaired_candidate):
+            return None
+        return tool_calls
+    if end != len(normalized_candidate):
         return None
     return tool_calls
 

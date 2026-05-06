@@ -298,6 +298,7 @@ def test_m365_minis_responses_returns_function_call_items(tmp_path) -> None:
     assert body["output"][0]["type"] == "message"
     assert body["output"][0]["content"][0]["text"] == "先看一下目录。"
     assert body["output"][1] == {
+        "id": "fc_call_123",
         "type": "function_call",
         "call_id": "call_123",
         "name": "shell_execute",
@@ -357,6 +358,9 @@ def test_m365_minis_responses_streaming_buffers_and_emits_function_calls(tmp_pat
     assert response.status_code == 200
     assert '"model": "m365-minis"' in payload
     assert '"type": "response.output_item.added"' in payload
+    assert '"type": "response.output_text.delta"' in payload
+    assert '"type": "response.function_call_arguments.delta"' in payload
+    assert '"type": "response.function_call_arguments.done"' in payload
     assert '"call_id": "call_123"' in payload
     assert '"name": "shell_execute"' in payload
     assert '"arguments": "{\\"cmd\\":\\"date\\"}"' in payload

@@ -61,3 +61,14 @@ def test_postprocess_extracts_fenced_json_tool_call_block() -> None:
     assert result.visible_text == "先解释一下。"
     assert len(result.tool_calls) == 1
     assert result.tool_calls[0].name == "shell_execute"
+
+
+def test_postprocess_repairs_missing_closing_bracket() -> None:
+    text = (
+        "先解释一下。\n\n"
+        '[{"type":"function_call","call_id":"call_1","name":"shell_execute","arguments":"{}"}'
+    )
+    result = postprocess_assistant_text(text)
+
+    assert result.visible_text == "先解释一下。"
+    assert len(result.tool_calls) == 1
