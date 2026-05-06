@@ -40,7 +40,7 @@ def compute_prior_history_hash(translated: TranslatedRequest) -> str:
 
 def compute_advanced_history_hash(translated: TranslatedRequest, assistant_text: str) -> str:
     advanced_turns = list(translated.prior_turns)
-    advanced_turns.append(HistoryTurn(role="user", text=translated.prompt))
+    advanced_turns.append(HistoryTurn(role=translated.prompt_role, text=translated.prompt))
     advanced_turns.append(HistoryTurn(role="assistant", text=assistant_text))
     return compute_history_hash(translated.system_text, advanced_turns)
 

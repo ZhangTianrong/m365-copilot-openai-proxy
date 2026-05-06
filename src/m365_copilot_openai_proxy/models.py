@@ -126,6 +126,7 @@ class HistoryTurn(BaseModel):
 
 class TranslatedRequest(BaseModel):
     prompt: str
+    prompt_role: Literal["user", "tool"] = "user"
     additional_context: list[str] = Field(default_factory=list)
     transport_additional_context: list[str] = Field(default_factory=list)
     attachments: list[TranslatedAttachment] = Field(default_factory=list)

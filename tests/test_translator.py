@@ -409,6 +409,7 @@ def test_translate_responses_request_allows_final_function_call_output() -> None
     translated = translate_responses_request(request)
 
     assert translated.prompt.startswith("<proxy_tool_output>")
+    assert translated.prompt_role == "tool"
     assert len(translated.prior_turns) == 2
     assert translated.prior_turns[0].role == "user"
     assert translated.prior_turns[1].role == "assistant"
@@ -447,6 +448,7 @@ def test_translate_openai_request_allows_final_tool_message() -> None:
     translated = translate_openai_request(request)
 
     assert translated.prompt.startswith("<proxy_tool_output>")
+    assert translated.prompt_role == "tool"
     assert len(translated.prior_turns) == 2
     assert translated.prior_turns[0].role == "user"
     assert translated.prior_turns[1].role == "assistant"

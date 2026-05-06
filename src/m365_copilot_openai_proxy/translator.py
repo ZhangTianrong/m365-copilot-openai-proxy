@@ -197,6 +197,7 @@ def translate_openai_request(request: OpenAIChatRequest) -> TranslatedRequest:
     prior_turns: list[HistoryTurn] = []
     transcript_lines: list[str] = []
     prompt = ""
+    prompt_role = "user"
     images: list[TranslatedImage] = []
     current_images: list[TranslatedImage] = []
 
@@ -226,6 +227,7 @@ def translate_openai_request(request: OpenAIChatRequest) -> TranslatedRequest:
             if message.role not in {"user", "tool"}:
                 raise ValueError("The final OpenAI message must be a user or tool message.")
             prompt = rendered_text
+            prompt_role = message.role
             current_images = list(message_images) if message.role == "user" else []
             continue
         _append_history_turn(prior_turns, transcript_lines, message.role, rendered_text)
@@ -239,6 +241,7 @@ def translate_openai_request(request: OpenAIChatRequest) -> TranslatedRequest:
         additional_context.append(f"Prior conversation transcript:\n{transcript_text}")
     return TranslatedRequest(
         prompt=prompt,
+        prompt_role=prompt_role,
         additional_context=additional_context,
         attachments=images,
         current_attachments=current_images,
@@ -262,6 +265,7 @@ def translate_responses_request(request: OpenAIResponsesRequest) -> TranslatedRe
     prior_turns: list[HistoryTurn] = []
     transcript_lines: list[str] = []
     prompt = ""
+    prompt_role = "user"
     images: list[TranslatedImage] = []
     current_images: list[TranslatedImage] = []
     normalized_entries: list[tuple[str, str, list[TranslatedImage]]] = []
@@ -364,6 +368,7 @@ def translate_responses_request(request: OpenAIResponsesRequest) -> TranslatedRe
             continue
         if index == last_index:
             prompt = rendered_text
+            prompt_role = role
             current_images = list(item_images) if role == "user" else []
             continue
         _append_history_turn(prior_turns, transcript_lines, role, rendered_text)
@@ -376,6 +381,7 @@ def translate_responses_request(request: OpenAIResponsesRequest) -> TranslatedRe
         additional_context.append(f"Prior conversation transcript:\n{transcript_text}")
     return TranslatedRequest(
         prompt=prompt,
+        prompt_role=prompt_role,
         additional_context=additional_context,
         attachments=images,
         current_attachments=current_images,

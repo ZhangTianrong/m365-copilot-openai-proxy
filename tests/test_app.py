@@ -718,6 +718,93 @@ def test_m365_minis_reuse_matches_structured_tool_call_history(tmp_path) -> None
     assert second_call["is_start_of_session"] is False
 
 
+def test_m365_minis_reuse_matches_tool_result_continuation_history(tmp_path) -> None:
+    fake = FakeCopilotClient(
+        text_response=(
+            "继续处理结果。\n\n"
+            '[{"type":"function_call","call_id":"call_456","name":"shell_execute","arguments":"{\\"cmd\\":\\"ls\\"}"}]'
+        )
+    )
+    client = build_client(fake, tmp_path, enable_reuse=True)
+
+    first = client.post(
+        "/v1/responses",
+        json={
+            "model": "m365-minis",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "Earlier"}]},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "我来调用终端。"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "shell_execute",
+                    "arguments": '{"cmd":"pwd"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "name": "shell_execute",
+                    "output": "/workspace",
+                },
+            ],
+        },
+    )
+    assert first.status_code == 200
+    first_call = fake.calls[0]
+
+    second = client.post(
+        "/v1/responses",
+        json={
+            "model": "m365-minis",
+            "input": [
+                {"role": "user", "content": [{"type": "input_text", "text": "Earlier"}]},
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "我来调用终端。"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "shell_execute",
+                    "arguments": '{"cmd":"pwd"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "name": "shell_execute",
+                    "output": "/workspace",
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "继续处理结果。"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_456",
+                    "name": "shell_execute",
+                    "arguments": '{"cmd":"ls"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_456",
+                    "name": "shell_execute",
+                    "output": "file-a\nfile-b",
+                },
+            ],
+        },
+    )
+    assert second.status_code == 200
+    second_call = fake.calls[1]
+    assert second_call["conversation_id"] == first_call["conversation_id"]
+    assert second_call["is_start_of_session"] is False
+
+
 def test_debug_logging_reports_request_and_sanitized_images(tmp_path, caplog) -> None:
     fake = FakeCopilotClient()
     client = build_client(fake, tmp_path, debug_logging=True)
