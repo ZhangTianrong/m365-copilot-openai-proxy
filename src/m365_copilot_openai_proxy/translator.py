@@ -85,6 +85,7 @@ def _extract_openai_content(
     images: list[TranslatedImage] = []
     image_refs: list[str] = []
     next_attachment_index = attachment_offset
+    next_ref_index = 1
     for part in content:
         if part.type in {"text", "input_text"}:
             text_parts.append(part.text or "")
@@ -98,8 +99,9 @@ def _extract_openai_content(
             try:
                 image = _parse_image_data_url(raw_image_url, image_index=next_attachment_index)
                 images.append(image)
-                image_refs.append(f"[Image {next_attachment_index}]")
+                image_refs.append(f"[Image {next_ref_index}]")
                 next_attachment_index += 1
+                next_ref_index += 1
             except ValueError:
                 continue
             continue

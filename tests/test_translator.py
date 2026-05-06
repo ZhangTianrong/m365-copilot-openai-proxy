@@ -61,7 +61,7 @@ def test_translate_openai_request_preserves_images_outside_final_user_message() 
     assert translated.images[0].content == b"hello"
 
 
-def test_translate_openai_request_numbers_history_and_final_images_together() -> None:
+def test_translate_openai_request_numbers_current_message_images_from_one() -> None:
     request = OpenAIChatRequest.model_validate(
         {
             "model": "ignored",
@@ -89,7 +89,40 @@ def test_translate_openai_request_numbers_history_and_final_images_together() ->
     assert translated.additional_context == [
         "Prior conversation transcript:\nUser: Earlier\n\nAttached images for this message: [Image 1]"
     ]
-    assert translated.prompt == "Now compare\n\nAttached images for this message: [Image 2]"
+    assert translated.prompt == "Now compare\n\nAttached images for this message: [Image 1]"
+    assert [image.filename for image in translated.images] == ["image.png", "image-2.jpg"]
+    assert [image.filename for image in translated.current_images] == ["image-2.jpg"]
+
+
+def test_translate_responses_request_numbers_current_message_images_from_one() -> None:
+    request = OpenAIResponsesRequest.model_validate(
+        {
+            "model": "ignored",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Earlier"},
+                        {"type": "input_image", "image_url": "data:image/png;base64,aGVsbG8="},
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": "Now compare"},
+                        {"type": "input_image", "image_url": "data:image/jpeg;base64,d29ybGQ="},
+                    ],
+                },
+            ],
+        }
+    )
+
+    translated = translate_responses_request(request)
+
+    assert translated.additional_context == [
+        "Prior conversation transcript:\nUser: Earlier\n\nAttached images for this message: [Image 1]"
+    ]
+    assert translated.prompt == "Now compare\n\nAttached images for this message: [Image 1]"
     assert [image.filename for image in translated.images] == ["image.png", "image-2.jpg"]
     assert [image.filename for image in translated.current_images] == ["image-2.jpg"]
 

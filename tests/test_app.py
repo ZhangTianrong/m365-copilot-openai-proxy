@@ -443,7 +443,7 @@ def test_openai_chat_completion_numbers_history_and_final_images_together(tmp_pa
     )
     assert response.status_code == 200
     call = fake.calls[0]
-    assert call["prompt"] == "Now compare\n\nAttached images for this message: [Image 2]"
+    assert call["prompt"] == "Now compare\n\nAttached images for this message: [Image 1]"
     assert call["additional_context"] == [
         "Prior conversation transcript:\nUser: Earlier\n\nAttached images for this message: [Image 1]"
     ]
