@@ -19,7 +19,12 @@ from .substrate_client import (
     SubstrateCopilotError,
 )
 from .token_store import TokenStoreError, load_auth_session
-from .models import AnthropicMessagesRequest, OpenAIChatRequest, OpenAIResponsesRequest
+from .models import (
+    AnthropicMessagesRequest,
+    ConversationTransportState,
+    OpenAIChatRequest,
+    OpenAIResponsesRequest,
+)
 from .translator import (
     translate_anthropic_request,
     translate_openai_request,
@@ -127,14 +132,22 @@ def create_app(
                     ),
                     media_type="text/event-stream",
                 )
+            transport_state = ConversationTransportState()
             text = await client.chat(
                 turn.prompt,
                 turn.additional_context,
                 turn.attachments,
                 conversation_id=turn.conversation_id,
+                transport_session_id=turn.transport_session_id,
                 is_start_of_session=turn.is_start_of_session,
+                transport_state=transport_state,
             )
-            conversation_reuse.complete_turn(turn, text)
+            conversation_reuse.complete_turn(
+                turn,
+                text,
+                resolved_conversation_id=transport_state.conversation_id,
+                resolved_transport_session_id=transport_state.session_id,
+            )
             _emit_debug_log(
                 settings,
                 "turn.completed",
@@ -203,14 +216,22 @@ def create_app(
             )
 
         try:
+            transport_state = ConversationTransportState()
             text = await client.chat(
                 turn.prompt,
                 turn.additional_context,
                 turn.attachments,
                 conversation_id=turn.conversation_id,
+                transport_session_id=turn.transport_session_id,
                 is_start_of_session=turn.is_start_of_session,
+                transport_state=transport_state,
             )
-            conversation_reuse.complete_turn(turn, text)
+            conversation_reuse.complete_turn(
+                turn,
+                text,
+                resolved_conversation_id=transport_state.conversation_id,
+                resolved_transport_session_id=transport_state.session_id,
+            )
             _emit_debug_log(
                 settings,
                 "turn.completed",
@@ -270,13 +291,21 @@ def create_app(
             )
 
         try:
+            transport_state = ConversationTransportState()
             text = await client.chat(
                 turn.prompt,
                 turn.additional_context,
                 conversation_id=turn.conversation_id,
+                transport_session_id=turn.transport_session_id,
                 is_start_of_session=turn.is_start_of_session,
+                transport_state=transport_state,
             )
-            conversation_reuse.complete_turn(turn, text)
+            conversation_reuse.complete_turn(
+                turn,
+                text,
+                resolved_conversation_id=transport_state.conversation_id,
+                resolved_transport_session_id=transport_state.session_id,
+            )
             _emit_debug_log(
                 settings,
                 "turn.completed",
@@ -390,6 +419,7 @@ def _log_translation_debug(
         "turn.prepared",
         endpoint=endpoint,
         conversation_id=turn.conversation_id,
+        transport_session_id=turn.transport_session_id,
         is_start_of_session=turn.is_start_of_session,
         routing_mode=turn.routing_mode,
         reuse_enabled=turn.routing_mode != "stateless_disabled",
@@ -417,6 +447,7 @@ async def _openai_stream(
 ) -> AsyncIterator[str]:
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
+    transport_state = ConversationTransportState()
     first_chunk = {
         "id": completion_id,
         "object": "chat.completion.chunk",
@@ -432,7 +463,9 @@ async def _openai_stream(
             turn.additional_context,
             turn.attachments,
             conversation_id=turn.conversation_id,
+            transport_session_id=turn.transport_session_id,
             is_start_of_session=turn.is_start_of_session,
+            transport_state=transport_state,
         ):
             full_text += delta
             chunk = {
@@ -461,7 +494,12 @@ async def _openai_stream(
         "model": model_alias,
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
     }
-    conversation_reuse.complete_turn(turn, full_text)
+    conversation_reuse.complete_turn(
+        turn,
+        full_text,
+        resolved_conversation_id=transport_state.conversation_id,
+        resolved_transport_session_id=transport_state.session_id,
+    )
     _emit_debug_log(
         settings,
         "turn.completed",
@@ -485,6 +523,7 @@ async def _responses_stream(
     resp_id = f"resp_{uuid.uuid4().hex}"
     item_id = f"msg_{uuid.uuid4().hex}"
     created = int(time.time())
+    transport_state = ConversationTransportState()
 
     yield f"data: {json.dumps({'type': 'response.created', 'response': {'id': resp_id, 'object': 'response', 'created_at': created, 'model': model_alias, 'status': 'in_progress', 'output': []}})}\n\n"
     yield f"data: {json.dumps({'type': 'response.output_item.added', 'output_index': 0, 'item': {'id': item_id, 'type': 'message', 'role': 'assistant', 'content': []}})}\n\n"
@@ -497,7 +536,9 @@ async def _responses_stream(
             turn.additional_context,
             turn.attachments,
             conversation_id=turn.conversation_id,
+            transport_session_id=turn.transport_session_id,
             is_start_of_session=turn.is_start_of_session,
+            transport_state=transport_state,
         ):
             full_text += delta
             yield f"data: {json.dumps({'type': 'response.output_text.delta', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'delta': delta})}\n\n"
@@ -514,7 +555,12 @@ async def _responses_stream(
         raise
 
     yield f"data: {json.dumps({'type': 'response.output_text.done', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'text': full_text})}\n\n"
-    conversation_reuse.complete_turn(turn, full_text)
+    conversation_reuse.complete_turn(
+        turn,
+        full_text,
+        resolved_conversation_id=transport_state.conversation_id,
+        resolved_transport_session_id=transport_state.session_id,
+    )
     _emit_debug_log(
         settings,
         "turn.completed",
@@ -535,6 +581,7 @@ async def _anthropic_stream(
     turn: PreparedConversationTurn,
 ) -> AsyncIterator[str]:
     msg_id = f"msg_{uuid.uuid4().hex}"
+    transport_state = ConversationTransportState()
 
     def sse(event: str, data: dict) -> str:
         return f"event: {event}\ndata: {json.dumps(data)}\n\n"
@@ -549,7 +596,9 @@ async def _anthropic_stream(
             turn.prompt,
             turn.additional_context,
             conversation_id=turn.conversation_id,
+            transport_session_id=turn.transport_session_id,
             is_start_of_session=turn.is_start_of_session,
+            transport_state=transport_state,
         ):
             full_text += delta
             yield sse("content_block_delta", {"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": delta}})
@@ -567,7 +616,12 @@ async def _anthropic_stream(
 
     yield sse("content_block_stop", {"type": "content_block_stop", "index": 0})
     yield sse("message_delta", {"type": "message_delta", "delta": {"stop_reason": "end_turn", "stop_sequence": None}, "usage": {"output_tokens": 0}})
-    conversation_reuse.complete_turn(turn, full_text)
+    conversation_reuse.complete_turn(
+        turn,
+        full_text,
+        resolved_conversation_id=transport_state.conversation_id,
+        resolved_transport_session_id=transport_state.session_id,
+    )
     _emit_debug_log(
         settings,
         "turn.completed",

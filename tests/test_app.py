@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from m365_copilot_openai_proxy.app import create_app
 from m365_copilot_openai_proxy.config import Settings
 from m365_copilot_openai_proxy.graph_client import filter_reserved_scopes
-from m365_copilot_openai_proxy.models import TranslatedImage
+from m365_copilot_openai_proxy.models import ConversationTransportState, TranslatedImage
 
 
 class FakeCopilotClient:
@@ -29,14 +29,19 @@ class FakeCopilotClient:
         images: list[TranslatedImage] | None = None,
         *,
         conversation_id: str,
+        transport_session_id: str | None = None,
         is_start_of_session: bool,
+        transport_state: ConversationTransportState | None = None,
     ) -> str:
+        if transport_state is not None:
+            transport_state.session_id = transport_session_id
         self.calls.append(
             {
                 "prompt": prompt,
                 "additional_context": additional_context,
                 "images": images or [],
                 "conversation_id": conversation_id,
+                "transport_session_id": transport_session_id,
                 "is_start_of_session": is_start_of_session,
             }
         )
@@ -49,14 +54,19 @@ class FakeCopilotClient:
         images: list[TranslatedImage] | None = None,
         *,
         conversation_id: str,
+        transport_session_id: str | None = None,
         is_start_of_session: bool,
+        transport_state: ConversationTransportState | None = None,
     ) -> AsyncIterator[str]:
+        if transport_state is not None:
+            transport_state.session_id = transport_session_id
         self.calls.append(
             {
                 "prompt": prompt,
                 "additional_context": additional_context,
                 "images": images or [],
                 "conversation_id": conversation_id,
+                "transport_session_id": transport_session_id,
                 "is_start_of_session": is_start_of_session,
             }
         )
@@ -175,6 +185,7 @@ def test_openai_chat_completion_translates_history(tmp_path) -> None:
             ],
             "images": [],
             "conversation_id": fake.calls[0]["conversation_id"],
+            "transport_session_id": None,
             "is_start_of_session": True,
         }
     ]
@@ -370,6 +381,7 @@ def test_anthropic_messages_drop_images(tmp_path) -> None:
             "additional_context": [],
             "images": [],
             "conversation_id": fake.calls[0]["conversation_id"],
+            "transport_session_id": None,
             "is_start_of_session": True,
         }
     ]
@@ -411,6 +423,7 @@ def test_openai_chat_completion_preserves_images_outside_final_user_message(tmp_
                 )
             ],
             "conversation_id": fake.calls[0]["conversation_id"],
+            "transport_session_id": None,
             "is_start_of_session": True,
         }
     ]

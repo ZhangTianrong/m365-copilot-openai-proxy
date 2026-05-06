@@ -9,7 +9,12 @@ from m365_copilot_openai_proxy.copilot_models import (
     CopilotModelTransport,
     resolve_copilot_model_transport,
 )
-from m365_copilot_openai_proxy.models import AuthSessionSnapshot, TranslatedImage, UploadedImage
+from m365_copilot_openai_proxy.models import (
+    AuthSessionSnapshot,
+    ConversationTransportState,
+    TranslatedImage,
+    UploadedImage,
+)
 from m365_copilot_openai_proxy.substrate_client import (
     SIGNALR_SEP,
     SubstrateCopilotClient,
@@ -25,7 +30,7 @@ def build_client() -> SubstrateCopilotClient:
     return SubstrateCopilotClient(_TEST_JWT, "America/New_York")
 
 
-def build_personal_client() -> SubstrateCopilotClient:
+def build_personal_client(*, search_access_token: str | None = None) -> SubstrateCopilotClient:
     return SubstrateCopilotClient(
         AuthSessionSnapshot(
             account_mode="personal",
@@ -43,6 +48,8 @@ def build_personal_client() -> SubstrateCopilotClient:
                 "&chatsessionid=chat-session-id"
                 "&licenseType=Starter&agent=web&scenario=OfficeWebIncludedCopilot"
             ),
+            search_access_token=search_access_token,
+            search_expires_at=4100000200 if search_access_token else None,
         ),
         "America/New_York",
     )
@@ -205,18 +212,200 @@ def test_chat_invoke_omits_tone_without_selected_model() -> None:
     assert "tone" not in body["arguments"][0]
 
 
-def test_personal_ws_url_uses_captured_websocket_url_verbatim() -> None:
+def test_personal_ws_url_uses_dynamic_turn_parameters() -> None:
     client = build_personal_client()
 
-    assert client._ws_url("conv-1", "session-1", "req-1") == (
+    assert client._ws_url(
+        "conv-1",
+        "session-1",
+        "req-1",
+        is_start_of_session=False,
+    ) == (
         "wss://substrate.office.com/m365Copilot/Chathub/"
         "00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
-        "?access_token=eyJhbGciOiJkaXIifQ.test.encrypted.value.more"
-        "&XRoutingParameterSessionKey=session-key"
-        "&clientrequestid=request-id"
-        "&chatsessionid=chat-session-id"
-        "&licenseType=Starter&agent=web&scenario=OfficeWebIncludedCopilot"
+        "?licenseType=Starter&agent=web&scenario=OfficeWebIncludedCopilot"
+        "&chatsessionid=req-1"
+        "&XRoutingParameterSessionKey=req-1"
+        "&clientrequestid=req-1"
+        "&X-SessionId=session-1"
+        "&access_token=eyJhbGciOiJkaXIifQ.test.encrypted.value.more"
+        "&ConversationId=conv-1"
     )
+
+
+def test_personal_ws_url_omits_conversation_id_on_first_turn() -> None:
+    client = build_personal_client()
+
+    assert client._ws_url(
+        "conv-1",
+        "session-1",
+        "req-1",
+        is_start_of_session=True,
+    ) == (
+        "wss://substrate.office.com/m365Copilot/Chathub/"
+        "00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
+        "?licenseType=Starter&agent=web&scenario=OfficeWebIncludedCopilot"
+        "&chatsessionid=req-1"
+        "&XRoutingParameterSessionKey=req-1"
+        "&clientrequestid=req-1"
+        "&X-SessionId=session-1"
+        "&access_token=eyJhbGciOiJkaXIifQ.test.encrypted.value.more"
+    )
+
+
+def test_personal_ws_url_keeps_websocket_query_token_when_snapshot_token_differs() -> None:
+    client = SubstrateCopilotClient(
+        AuthSessionSnapshot(
+            account_mode="personal",
+            access_token="substrate-rest-token-from-storage",
+            expires_at=4100000000,
+            captured_at=123,
+            oid="00000000-0000-0000-853e-527a6bf3c11e",
+            tid="84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa",
+            websocket_url=(
+                "wss://substrate.office.com/m365Copilot/Chathub/"
+                "00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
+                "?access_token=ws-query-token"
+                "&licenseType=Premium&agent=web&scenario=OfficeWebPremiumConsumerCopilot"
+            ),
+        ),
+        "America/New_York",
+    )
+
+    url = client._ws_url(
+        "conv-1",
+        "session-1",
+        "req-1",
+        is_start_of_session=True,
+    )
+
+    assert "access_token=ws-query-token" in url
+    assert "substrate-rest-token-from-storage" not in url
+
+
+def test_personal_upload_uses_turn_scoped_unfurl_cvid(monkeypatch) -> None:
+    client = build_personal_client(search_access_token="search-token")
+    attachment = TranslatedImage(
+        kind="file",
+        filename="image.pdf",
+        mime_type="application/pdf",
+        file_extension="pdf",
+        data_url="data:application/pdf;base64,aGVsbG8=",
+        content=b"hello",
+    )
+    captured: dict[str, object] = {"post_calls": []}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def post(self, url, files=None, headers=None, json=None):
+            captured["post_calls"].append({"url": url, "json": json, "headers": headers})
+            request = httpx.Request("POST", url)
+            if "createUploadSession" in url:
+                return httpx.Response(
+                    200,
+                    request=request,
+                    json={"uploadUrl": "https://upload.example/personal-session"},
+                )
+            return httpx.Response(200, request=request, json={"ApiVersion": "1.0"})
+
+        async def put(self, url, headers=None, content=None):
+            request = httpx.Request("PUT", url)
+            return httpx.Response(
+                201,
+                request=request,
+                    json={
+                        "id": "item-1",
+                        "name": "image.pdf",
+                        "file": {"fileExtension": ".pdf"},
+                    "parentReference": {
+                        "driveType": "personal",
+                        "driveId": "drive-1",
+                    },
+                },
+            )
+
+    monkeypatch.setattr("m365_copilot_openai_proxy.substrate_client.httpx.AsyncClient", FakeAsyncClient)
+
+    asyncio.run(
+        client._upload_attachment(
+            attachment,
+            upload_conversation_id="upload-conv",
+            chat_conversation_id="chat-conv",
+        )
+    )
+
+    unfurl_call = captured["post_calls"][1]
+    assert unfurl_call["json"]["Cvid"] == "upload-conv"
+    assert unfurl_call["headers"]["Authorization"] == "Bearer search-token"
+
+
+def test_personal_chat_stream_extracts_remote_conversation_id(monkeypatch) -> None:
+    client = build_personal_client()
+    captured_url: dict[str, str] = {}
+
+    class FakeWebSocket:
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb):
+            return False
+
+        async def send(self, data):
+            return None
+
+        async def recv(self):
+            return "{}" + SIGNALR_SEP
+
+        def __aiter__(self):
+            async def generator():
+                yield json.dumps(
+                    {
+                        "type": 2,
+                        "item": {
+                            "conversationId": "remote-conv-1",
+                            "messages": [{"author": "assistant", "text": "hello"}],
+                        },
+                    }
+                ) + SIGNALR_SEP
+                yield json.dumps({"type": 3}) + SIGNALR_SEP
+
+            return generator()
+
+    def fake_connect(url, additional_headers=None):
+        captured_url["url"] = url
+        return FakeWebSocket()
+
+    monkeypatch.setattr("m365_copilot_openai_proxy.substrate_client.websockets.connect", fake_connect)
+    async def fake_upload_attachments(attachments, *, chat_conversation_id):
+        return []
+
+    monkeypatch.setattr(client, "_upload_attachments", fake_upload_attachments)
+
+    transport_state = ConversationTransportState()
+    text = asyncio.run(
+        client.chat(
+            "hello",
+            [],
+            [],
+            conversation_id="local-placeholder",
+            transport_session_id="session-1",
+            is_start_of_session=True,
+            transport_state=transport_state,
+        )
+    )
+
+    assert text == "hello"
+    assert transport_state.conversation_id == "remote-conv-1"
+    assert transport_state.session_id == "session-1"
+    assert "X-SessionId=session-1" in captured_url["url"]
 
 
 def test_upload_image_uses_expected_headers_and_form_fields(monkeypatch) -> None:
@@ -446,7 +635,7 @@ def test_enterprise_file_upload_falls_back_to_access_token_without_search_token(
 
 
 def test_personal_upload_image_uses_snapshot_anchor_mailbox(monkeypatch) -> None:
-    client = build_personal_client()
+    client = build_personal_client(search_access_token="personal-search-token")
     attachment = TranslatedImage(
         filename="image.png",
         mime_type="image/png",
@@ -525,6 +714,7 @@ def test_personal_upload_image_uses_snapshot_anchor_mailbox(monkeypatch) -> None
     assert unfurl_call["headers"]["x-anchormailbox"] == (
         "Oid:00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
     )
+    assert unfurl_call["headers"]["Authorization"] == "Bearer personal-search-token"
     assert unfurl_call["headers"]["x-routingparameter-sessionkey"] == (
         "Oid:00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
     )

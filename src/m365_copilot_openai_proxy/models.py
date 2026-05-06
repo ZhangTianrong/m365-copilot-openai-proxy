@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
@@ -137,6 +138,12 @@ class AuthSessionSnapshot(BaseModel):
     graph_expires_at: int | None = None
     search_access_token: str | None = None
     search_expires_at: int | None = None
+
+
+@dataclass(slots=True)
+class ConversationTransportState:
+    conversation_id: str | None = None
+    session_id: str | None = None
 
 
 TranslatedImage = TranslatedAttachment

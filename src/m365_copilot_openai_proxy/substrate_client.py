@@ -6,14 +6,19 @@ import uuid
 from collections.abc import AsyncIterator
 from datetime import datetime
 import base64
-from urllib.parse import quote
+from urllib.parse import parse_qsl, quote, urlencode, urlsplit, urlunsplit
 from uuid import UUID
 
 import httpx
 import websockets
 
 from .copilot_models import CopilotModelTransport
-from .models import AuthSessionSnapshot, TranslatedAttachment, UploadedAttachment
+from .models import (
+    AuthSessionSnapshot,
+    ConversationTransportState,
+    TranslatedAttachment,
+    UploadedAttachment,
+)
 from .token_store import build_enterprise_auth_session
 
 SIGNALR_SEP = "\x1e"
@@ -126,15 +131,72 @@ class SubstrateCopilotClient:
         self._oid = auth_session.oid
         self._tid = auth_session.tid
         self._websocket_url = auth_session.websocket_url
+        self._personal_ws_parts = urlsplit(self._websocket_url) if self._websocket_url else None
+        self._personal_static_query = self._extract_personal_static_query(self._websocket_url)
+        self._personal_ws_access_token = self._extract_personal_ws_access_token(self._websocket_url)
 
-    def _ws_url(self, conv_id: str, session_id: str, req_id: str) -> str:
+    @staticmethod
+    def _extract_personal_static_query(websocket_url: str | None) -> list[tuple[str, str]]:
+        if not websocket_url:
+            return []
+        mutable = {
+            "access_token",
+            "clientrequestid",
+            "chatsessionid",
+            "xroutingparametersessionkey",
+            "x-sessionid",
+            "conversationid",
+        }
+        return [
+            (key, value)
+            for key, value in parse_qsl(urlsplit(websocket_url).query, keep_blank_values=True)
+            if key.lower() not in mutable
+        ]
+
+    @staticmethod
+    def _extract_personal_ws_access_token(websocket_url: str | None) -> str | None:
+        if not websocket_url:
+            return None
+        for key, value in parse_qsl(urlsplit(websocket_url).query, keep_blank_values=True):
+            if key == "access_token" and value:
+                return value
+        return None
+
+    def _ws_url(
+        self,
+        conv_id: str,
+        session_id: str,
+        req_id: str,
+        *,
+        is_start_of_session: bool,
+    ) -> str:
         if self._auth_session.account_mode == "personal":
-            if not self._websocket_url:
+            if not self._personal_ws_parts:
                 raise SubstrateCopilotError(
                     "Personal auth session is missing a captured Copilot WebSocket URL. "
                     "Re-run `copilot-openai-proxy login` or `copilot-openai-proxy refresh-token`."
                 )
-            return self._websocket_url
+            query = list(self._personal_static_query)
+            query.extend(
+                [
+                    ("chatsessionid", req_id),
+                    ("XRoutingParameterSessionKey", req_id),
+                    ("clientrequestid", req_id),
+                    ("X-SessionId", session_id),
+                    ("access_token", self._personal_ws_access_token or self._token),
+                ]
+            )
+            if not is_start_of_session and conv_id:
+                query.append(("ConversationId", conv_id))
+            return urlunsplit(
+                (
+                    self._personal_ws_parts.scheme,
+                    self._personal_ws_parts.netloc,
+                    self._personal_ws_parts.path,
+                    urlencode(query),
+                    self._personal_ws_parts.fragment,
+                )
+            )
         token = quote(self._token, safe="")
         return (
             f"{_WS_BASE}/{self._oid}@{self._tid}"
@@ -346,7 +408,7 @@ class SubstrateCopilotClient:
                 client_request_id = str(uuid.uuid4())
                 client_session_id = str(uuid.uuid4())
                 unfurl_body = {
-                    "EntityRequests": [
+                "EntityRequests": [
                         {
                             "QueryAnnotations": [
                                 {
@@ -420,7 +482,7 @@ class SubstrateCopilotClient:
                 drive_item_id=drive_item_id,
                 uploaded_file_url=uploaded_file_url,
             ),
-        )
+            )
 
     async def _upload_attachment(
         self,
@@ -432,13 +494,17 @@ class SubstrateCopilotClient:
         if attachment.kind == "file":
             return await self._upload_graph_file_attachment(
                 attachment,
-                conversation_id=chat_conversation_id,
+                conversation_id=(
+                    upload_conversation_id
+                    if self._auth_session.account_mode == "personal"
+                    else chat_conversation_id
+                ),
             )
         if self._auth_session.account_mode == "personal":
             attachment = _convert_image_attachment_to_pdf(attachment)
             return await self._upload_graph_file_attachment(
                 attachment,
-                conversation_id=chat_conversation_id,
+                conversation_id=upload_conversation_id,
             )
         return await self._upload_enterprise_attachment(
             attachment,
@@ -490,13 +556,22 @@ class SubstrateCopilotClient:
         attachments: list[TranslatedAttachment] | None = None,
         *,
         conversation_id: str,
+        transport_session_id: str | None = None,
         is_start_of_session: bool,
+        transport_state: ConversationTransportState | None = None,
     ) -> AsyncIterator[str]:
         text = _combine_text(prompt, additional_context)
         conv_id = conversation_id
-        session_id = str(uuid.uuid4())
+        session_id = transport_session_id or str(uuid.uuid4())
         req_id = str(uuid.uuid4())
-        url = self._ws_url(conv_id, session_id, req_id)
+        url = self._ws_url(
+            conv_id,
+            session_id,
+            req_id,
+            is_start_of_session=is_start_of_session,
+        )
+        if transport_state is not None:
+            transport_state.session_id = session_id
         uploaded_attachments = await self._upload_attachments(
             attachments or [],
             chat_conversation_id=conv_id,
@@ -531,6 +606,10 @@ class SubstrateCopilotClient:
                             msg = json.loads(part)
                         except json.JSONDecodeError:
                             continue
+                        if transport_state is not None:
+                            resolved_conversation_id = _extract_conversation_id(msg)
+                            if resolved_conversation_id:
+                                transport_state.conversation_id = resolved_conversation_id
                         t = msg.get("type")
                         if t == 6:
                             continue
@@ -571,7 +650,9 @@ class SubstrateCopilotClient:
         attachments: list[TranslatedAttachment] | None = None,
         *,
         conversation_id: str,
+        transport_session_id: str | None = None,
         is_start_of_session: bool,
+        transport_state: ConversationTransportState | None = None,
     ) -> str:
         chunks: list[str] = []
         async for chunk in self.chat_stream(
@@ -579,7 +660,9 @@ class SubstrateCopilotClient:
             additional_context,
             attachments,
             conversation_id=conversation_id,
+            transport_session_id=transport_session_id,
             is_start_of_session=is_start_of_session,
+            transport_state=transport_state,
         ):
             chunks.append(chunk)
         return "".join(chunks)
@@ -591,6 +674,23 @@ def _combine_text(prompt: str, context: list[str]) -> str:
     if not prompt:
         return "\n\n".join(context)
     return "\n\n".join(context) + "\n\n---\n\n" + prompt
+
+
+def _extract_conversation_id(value: object) -> str | None:
+    if isinstance(value, dict):
+        direct = value.get("conversationId")
+        if isinstance(direct, str) and direct:
+            return direct
+        for nested_value in value.values():
+            resolved = _extract_conversation_id(nested_value)
+            if resolved:
+                return resolved
+    elif isinstance(value, list):
+        for item in value:
+            resolved = _extract_conversation_id(item)
+            if resolved:
+                return resolved
+    return None
 
 
 def _message_annotation_type(attachment: UploadedAttachment) -> str:

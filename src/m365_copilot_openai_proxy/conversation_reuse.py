@@ -49,11 +49,13 @@ def compute_advanced_history_hash(translated: TranslatedRequest, assistant_text:
 class ReservedConversation:
     conversation_id: str
     current_history_hash: str
+    transport_session_id: str | None = None
 
 
 @dataclass(slots=True)
 class PreparedConversationTurn:
     conversation_id: str
+    transport_session_id: str | None
     is_start_of_session: bool
     routing_mode: str
     prompt: str
@@ -79,7 +81,7 @@ class ConversationHistoryStore:
             with self._connect() as conn:
                 row = conn.execute(
                     """
-                    SELECT conversation_id, current_history_hash
+                    SELECT conversation_id, current_history_hash, transport_session_id
                     FROM conversations
                     WHERE scope_user = ? AND current_history_hash = ?
                     """,
@@ -94,6 +96,11 @@ class ConversationHistoryStore:
             return ReservedConversation(
                 conversation_id=conversation_id,
                 current_history_hash=str(row["current_history_hash"]),
+                transport_session_id=(
+                    str(row["transport_session_id"])
+                    if row["transport_session_id"] is not None
+                    else None
+                ),
             )
 
     def release(self, conversation_id: str | None) -> None:
@@ -107,6 +114,8 @@ class ConversationHistoryStore:
         scope_user: str | None,
         conversation_id: str,
         new_history_hash: str,
+        *,
+        transport_session_id: str | None = None,
     ) -> None:
         normalized_scope = _normalize_scope_user(scope_user)
         now = time.time()
@@ -126,17 +135,26 @@ class ConversationHistoryStore:
                         conversation_id,
                         scope_user,
                         current_history_hash,
+                        transport_session_id,
                         turn_count,
                         created_at,
                         updated_at
-                    ) VALUES (?, ?, ?, 1, ?, ?)
+                    ) VALUES (?, ?, ?, ?, 1, ?, ?)
                     ON CONFLICT(conversation_id) DO UPDATE SET
                         scope_user = excluded.scope_user,
                         current_history_hash = excluded.current_history_hash,
+                        transport_session_id = excluded.transport_session_id,
                         turn_count = conversations.turn_count + 1,
                         updated_at = excluded.updated_at
                     """,
-                    (conversation_id, normalized_scope, new_history_hash, now, now),
+                    (
+                        conversation_id,
+                        normalized_scope,
+                        new_history_hash,
+                        transport_session_id,
+                        now,
+                        now,
+                    ),
                 )
                 self._evict_locked(conn)
 
@@ -156,12 +174,19 @@ class ConversationHistoryStore:
                     conversation_id TEXT PRIMARY KEY,
                     scope_user TEXT NOT NULL,
                     current_history_hash TEXT NOT NULL,
+                    transport_session_id TEXT,
                     turn_count INTEGER NOT NULL,
                     created_at REAL NOT NULL,
                     updated_at REAL NOT NULL
                 )
                 """
             )
+            columns = {
+                str(row["name"])
+                for row in conn.execute("PRAGMA table_info(conversations)").fetchall()
+            }
+            if "transport_session_id" not in columns:
+                conn.execute("ALTER TABLE conversations ADD COLUMN transport_session_id TEXT")
             conn.execute(
                 """
                 CREATE UNIQUE INDEX IF NOT EXISTS idx_conversations_scope_history
@@ -204,6 +229,7 @@ class ConversationHistoryStore:
 class ConversationReuseService:
     def __init__(self, settings: Settings):
         self._enabled = settings.enable_conversation_reuse
+        self._account_mode = settings.account_mode
         self._store = ConversationHistoryStore(
             settings.conversation_db_path,
             max_conversations=settings.conversation_max_conversations,
@@ -218,6 +244,7 @@ class ConversationReuseService:
         if not self._enabled:
             return PreparedConversationTurn(
                 conversation_id=str(uuid.uuid4()),
+                transport_session_id=None,
                 is_start_of_session=True,
                 routing_mode="stateless_disabled",
                 prompt=translated.prompt,
@@ -232,6 +259,7 @@ class ConversationReuseService:
         if reserved is None:
             return PreparedConversationTurn(
                 conversation_id=str(uuid.uuid4()),
+                transport_session_id=str(uuid.uuid4()) if self._account_mode == "personal" else None,
                 is_start_of_session=True,
                 routing_mode="stateless_miss",
                 prompt=translated.prompt,
@@ -243,6 +271,8 @@ class ConversationReuseService:
 
         return PreparedConversationTurn(
             conversation_id=reserved.conversation_id,
+            transport_session_id=reserved.transport_session_id
+            or (str(uuid.uuid4()) if self._account_mode == "personal" else None),
             is_start_of_session=False,
             routing_mode="reused",
             prompt=translated.prompt,
@@ -253,12 +283,24 @@ class ConversationReuseService:
             reserved_conversation_id=reserved.conversation_id,
         )
 
-    def complete_turn(self, turn: PreparedConversationTurn, assistant_text: str) -> None:
+    def complete_turn(
+        self,
+        turn: PreparedConversationTurn,
+        assistant_text: str,
+        *,
+        resolved_conversation_id: str | None = None,
+        resolved_transport_session_id: str | None = None,
+    ) -> None:
         if not self._enabled:
             return
         try:
             new_history_hash = compute_advanced_history_hash(turn.translated, assistant_text)
-            self._store.advance(turn.scope_user, turn.conversation_id, new_history_hash)
+            self._store.advance(
+                turn.scope_user,
+                resolved_conversation_id or turn.conversation_id,
+                new_history_hash,
+                transport_session_id=resolved_transport_session_id or turn.transport_session_id,
+            )
         finally:
             self._store.release(turn.reserved_conversation_id)
 
