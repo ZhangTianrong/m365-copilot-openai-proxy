@@ -1,6 +1,8 @@
 # Microsoft 365 Copilot OpenAI Proxy
 
-A local proxy server that exposes Microsoft 365 Copilot as an OpenAI-compatible API. No Azure app registration or admin consent required.
+A local proxy server that exposes Microsoft 365 Copilot as OpenAI-compatible and Anthropic-compatible APIs. No Azure app registration or admin consent required.
+
+This repository is now a fork with behavior that intentionally diverges from the upstream project. The source of truth is the code in this repo and the constraints documented below, not upstream README text or examples.
 
 ## How it works
 
@@ -12,7 +14,7 @@ The proxy connects to `substrate.office.com` — the same WebSocket API the M365
 - `GET /v1/models`
 - `POST /v1/chat/completions` — OpenAI Chat Completions (streaming supported)
 - `POST /v1/responses` — OpenAI Responses API (streaming supported)
-- `POST /v1/messages` — Anthropic Messages API (non-streaming)
+- `POST /v1/messages` — Anthropic Messages API (streaming supported)
 
 ## Constraints
 
@@ -21,15 +23,20 @@ The proxy connects to `substrate.office.com` — the same WebSocket API the M365
 - Optional conversation reuse can be enabled globally to continue the latest matching conversation state from a local SQLite cache.
 - System prompts and conversation history are folded into the message as plain text.
 - Tool calls and token usage are not supported.
+- The public attachment surface is image-only. Explicit `file` / `input_file` parts are ignored.
+- Remote image URLs are not fetched. Only `data:image/...;base64,...` parts are accepted.
 - **Claude Code:** Agentic features (file reading, bash, code editing) require tool use, which this proxy does not support. Use the proxy for general Q&A only; keep Claude Code on the real Anthropic API for coding tasks.
 
 ## Multimodal Status
 
 - OpenAI Chat Completions and OpenAI Responses accept `data:image/...;base64,...` image parts in user messages.
-- Those images are uploaded to Copilot and forwarded as image attachments on the proxied request.
-- Because each API call still becomes one fresh Copilot turn, earlier user-message images are replayed into that turn and referenced in the reconstructed plain-text transcript as `[Image N]`.
-- Non-image attachments, remote image URLs, and unsupported image shapes are ignored instead of failing the whole request.
-- Anthropic-style requests stay text-only for now. Any attachment parts are dropped.
+- Those images are uploaded to Copilot and forwarded as attachments on the proxied request.
+- In `enterprise` mode, images use the Copilot image upload path.
+- In `personal` mode, images are internally converted to PDF and sent through the file-upload path because the consumer UI does not expose the same image upload transport.
+- Conversation reuse now applies to image requests as well. Images are no longer forced into stateless mode.
+- Earlier user-message images are still represented in the reconstructed plain-text transcript as `[Image N]` markers.
+- Explicit non-image file parts, remote image URLs, and unsupported image shapes are ignored instead of failing the whole request.
+- Anthropic-style requests remain text-only from the public API perspective. Non-text attachment parts are dropped.
 
 ---
 
@@ -63,6 +70,8 @@ M365_ACCOUNT_MODE=personal
 
 If `M365_LOGIN_EMAIL`, `M365_LOGIN_PASSWORD`, and `M365_LOGIN_TOTP_SECRET` are set, the Playwright login flow will first try a fully headless Microsoft sign-in using those credentials and the current TOTP code.
 
+Do not share the same `M365_PROFILE_DIR` or `M365_AUTH_STATE_FILE` between `enterprise` and `personal` runs. Keep separate state for each account mode.
+
 In `personal` mode, the login automation follows the verified consumer path through `login.live.com`, including:
 
 - `Other ways to sign in`
@@ -75,7 +84,7 @@ In `personal` mode, the login automation follows the verified consumer path thro
 uv run copilot-openai-proxy refresh-daemon
 ```
 
-The refresher reuses the persistent profile, refreshes the token before expiry, and updates the shared token file in place.
+The refresher reuses the persistent profile, refreshes the token before expiry, updates the auth snapshot first, and then mirrors the current token file in place.
 
 ### 4. Start the server
 
@@ -106,6 +115,11 @@ When enabled, the proxy:
 - otherwise falls back to the current stateless behavior and reconstructs prior history into the prompt prefix
 
 The local cache is stored in SQLite and only tracks the latest checkpoint for each Copilot conversation.
+
+Behavior differences by account mode:
+
+- `enterprise`: reuse stores the Copilot conversation id only.
+- `personal`: reuse stores both the resolved Copilot conversation id and a transport session id, because follow-up websocket turns require additional client session continuity.
 
 ### 6. Optional debug logging
 
@@ -175,6 +189,8 @@ docker compose up -d --build
 - `api` serves the OpenAI-compatible HTTP API.
 - `token-refresher` runs the Playwright refresh daemon and persists its browser profile in `./state/profile`.
 
+If you use both `enterprise` and `personal` accounts on the same machine, do not point both stacks at the same `./state` directory. Keep separate host directories, profiles, and auth snapshots per account mode.
+
 For a fully headless first login, set these environment variables for the `token-refresher` service through your shell or `.env` file before running Compose:
 
 ```bash
@@ -227,7 +243,7 @@ If a headed login still does not exit after sign-in, click into the chat box and
 
 If the saved profile lands on `Enter password` and no credential env vars are set, Microsoft is requiring interactive reauthentication and the headless refresher cannot complete that step by itself.
 
-Once `Token saved to /data/access_token.txt.` is printed and the command exits, `docker compose up -d` is enough for normal headless operation.
+Once the refresher logs `refresh.saved` or the login command logs `login.saved`, `docker compose up -d` is enough for normal headless operation.
 
 When that login or reauthentication passes through the real Microsoft sign-in flow, the refresher also runs the model probe automatically and prints the discovered labels plus the observed websocket transport mapping. That probe is for discovery and logging only; a failure there does not fail token acquisition.
 
@@ -364,5 +380,3 @@ $r.content[0].text
 ---
 
 ## Token automation notes
-
-See [TOKEN_REFRESH.md](TOKEN_REFRESH.md) for the design tradeoffs between Playwright, Edge CDP, and the older manual flow.

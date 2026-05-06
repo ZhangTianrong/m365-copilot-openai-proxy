@@ -6,7 +6,7 @@ ENV PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app
 
-COPY pyproject.toml README.md TOKEN_REFRESH.md /app/
+COPY pyproject.toml README.md /app/
 COPY src /app/src
 
 RUN pip install --no-cache-dir ".[refresh]" \
