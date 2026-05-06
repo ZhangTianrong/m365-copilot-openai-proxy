@@ -6,6 +6,8 @@ services:
       - "8000:8000"
     environment:
       M365_ACCESS_TOKEN_FILE: /data/access_token.txt
+      M365_AUTH_STATE_FILE: /data/auth_session.json
+      M365_ACCOUNT_MODE: ${M365_ACCOUNT_MODE:-enterprise}
       M365_TIME_ZONE: ${M365_TIME_ZONE:-Asia/Tokyo}
       M365_MODEL_ALIAS: ${M365_MODEL_ALIAS:-m365-copilot}
       M365_COPILOT_MODEL_NAME: ${M365_COPILOT_MODEL_NAME:-}
@@ -23,11 +25,14 @@ services:
     command: ["copilot-openai-proxy", "refresh-daemon"]
     environment:
       M365_ACCESS_TOKEN_FILE: /data/access_token.txt
+      M365_AUTH_STATE_FILE: /data/auth_session.json
+      M365_ACCOUNT_MODE: ${M365_ACCOUNT_MODE:-enterprise}
       M365_PROFILE_DIR: /data/profile
       M365_LOGIN_URL: ${M365_LOGIN_URL:-https://m365.cloud.microsoft/chat}
       M365_LOGIN_EMAIL: ${M365_LOGIN_EMAIL:-}
       M365_LOGIN_PASSWORD: ${M365_LOGIN_PASSWORD:-}
       M365_LOGIN_TOTP_SECRET: ${M365_LOGIN_TOTP_SECRET:-}
+      M365_DEBUG_LOGGING: ${M365_DEBUG_LOGGING:-false}
       M365_AUTO_PROBE_MODELS_ON_LOGIN: ${M365_AUTO_PROBE_MODELS_ON_LOGIN:-true}
       M365_TOKEN_CAPTURE_TIMEOUT_SECONDS: ${M365_TOKEN_CAPTURE_TIMEOUT_SECONDS:-600}
       M365_TOKEN_REFRESH_BUFFER_SECONDS: ${M365_TOKEN_REFRESH_BUFFER_SECONDS:-300}

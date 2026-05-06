@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 
 from m365_copilot_openai_proxy.config import Settings
 from m365_copilot_openai_proxy.models import AuthSessionSnapshot
@@ -46,7 +47,7 @@ class FakePage:
     async def goto(self, url: str, wait_until: str) -> None:
         self.goto_calls.append((url, wait_until))
 
-    async def evaluate(self, _script: str):
+    async def evaluate(self, _script: str, *_args):
         if self._evaluate_values:
             return self._evaluate_values.pop(0)
         return None
@@ -358,6 +359,63 @@ def test_open_authenticated_context_captures_personal_auth_snapshot(monkeypatch,
     assert auth_state.detected_account_mode == "personal"
 
 
+def test_open_authenticated_context_accepts_personal_session_without_reauth(monkeypatch, tmp_path) -> None:
+    page = FakePage(
+        [
+            {
+                "secret": "substrate-rest-token",
+                "expiresOn": 4100000000,
+                "target": "https://substrate.office.com/.default https://substrate.office.com/M365.Access",
+            },
+            {
+                "secret": "substrate-rest-token",
+                "expiresOn": 4100000000,
+                "target": "https://substrate.office.com/.default https://substrate.office.com/M365.Access",
+            },
+            {
+                "access_token": "graph-token",
+                "expires_in": 300,
+            },
+            None,
+        ]
+    )
+    page.url = "https://m365.cloud.microsoft/chat"
+
+    def emit_websocket():
+        page.events["websocket"](
+            type(
+                "FakeWebSocket",
+                (),
+                {
+                    "url": "wss://substrate.office.com/m365Copilot/Chathub/"
+                    "00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
+                    "?access_token=eyJhbGciOiJkaXIifQ.test.encrypted.value.more",
+                },
+            )()
+        )
+
+    page.click_hooks["textarea"] = emit_websocket
+    page.selector_counts["textarea"] = 1
+    context, manager = install_fake_playwright(monkeypatch, page)
+    settings = Settings(
+        _env_file=None,
+        M365_ACCOUNT_MODE="personal",
+        M365_PROFILE_DIR=str(tmp_path / "profile"),
+    )
+
+    returned_manager, returned_context, _page, auth_session, auth_state = asyncio.run(
+        open_authenticated_context(settings, headed=False, timeout_seconds=2)
+    )
+
+    assert returned_manager is manager
+    assert returned_context is context
+    assert auth_session.account_mode == "personal"
+    assert auth_session.access_token == "substrate-rest-token"
+    assert auth_session.websocket_url is not None
+    assert auth_state.saw_login_host is False
+    assert auth_state.detected_account_mode is None
+
+
 def test_parse_storage_auth_record_accepts_opaque_secret() -> None:
     record = _parse_storage_auth_record(
         {
@@ -448,6 +506,64 @@ def test_refresh_daemon_forces_refresh_on_startup(monkeypatch, tmp_path) -> None
 
     assert calls[:3] == ["load", "refresh", "load"]
     assert refresh_timeouts == [settings.token_capture_timeout_seconds]
+
+
+def test_refresh_daemon_emits_verbose_logs(monkeypatch, tmp_path, capsys) -> None:
+    settings = Settings(
+        _env_file=None,
+        M365_ACCOUNT_MODE="enterprise",
+        M365_AUTH_STATE_FILE=str(tmp_path / "auth_session.json"),
+        M365_ACCESS_TOKEN_FILE=str(tmp_path / "access_token.txt"),
+        M365_TOKEN_CAPTURE_TIMEOUT_SECONDS=456,
+        M365_TOKEN_REFRESH_BUFFER_SECONDS=300,
+        M365_DEBUG_LOGGING=True,
+    )
+    auth_session = AuthSessionSnapshot(
+        account_mode="enterprise",
+        access_token="existing-token",
+        expires_at=4100000000,
+        captured_at=123,
+        oid="oid",
+        tid="tid",
+    )
+
+    def fake_load_auth_session(_settings: Settings) -> AuthSessionSnapshot:
+        return auth_session
+
+    async def fake_refresh_token_with_playwright(_settings: Settings, *, headed: bool = False, timeout_seconds: int = 90):
+        return tmp_path / "auth_session.json"
+
+    def fake_auth_session_needs_refresh(_auth_session: AuthSessionSnapshot, _buffer_seconds: int) -> bool:
+        return False
+
+    def fake_auth_session_expires_at(_auth_session: AuthSessionSnapshot) -> int | None:
+        return 9999999999
+
+    class StopDaemon(Exception):
+        pass
+
+    async def fake_sleep(_delay: float) -> None:
+        raise StopDaemon()
+
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.load_auth_session", fake_load_auth_session)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.refresh_token_with_playwright", fake_refresh_token_with_playwright)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.auth_session_needs_refresh", fake_auth_session_needs_refresh)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.auth_session_expires_at", fake_auth_session_expires_at)
+    monkeypatch.setattr("m365_copilot_openai_proxy.playwright_refresh.asyncio.sleep", fake_sleep)
+
+    try:
+        asyncio.run(run_refresh_daemon(settings))
+    except StopDaemon:
+        pass
+
+    events = [
+        json.loads(line)["event"]
+        for line in capsys.readouterr().out.splitlines()
+        if line.strip().startswith("{")
+    ]
+    assert "daemon.auth_state_loaded" in events
+    assert "daemon.refresh_decision" in events
+    assert "daemon.refresh_start" in events
 
 
 def test_login_with_playwright_runs_model_probe_after_personal_reauth(monkeypatch, tmp_path) -> None:
