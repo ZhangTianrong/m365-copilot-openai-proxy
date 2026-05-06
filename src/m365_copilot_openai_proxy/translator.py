@@ -223,10 +223,10 @@ def translate_openai_request(request: OpenAIChatRequest) -> TranslatedRequest:
             system_lines.append(rendered_text)
             continue
         if is_last:
-            if message.role != "user":
-                raise ValueError("The final OpenAI message must be a user message.")
+            if message.role not in {"user", "tool"}:
+                raise ValueError("The final OpenAI message must be a user or tool message.")
             prompt = rendered_text
-            current_images = list(message_images)
+            current_images = list(message_images) if message.role == "user" else []
             continue
         _append_history_turn(prior_turns, transcript_lines, message.role, rendered_text)
 
@@ -354,8 +354,8 @@ def translate_responses_request(request: OpenAIResponsesRequest) -> TranslatedRe
     for index, (role, _rendered_text, _item_images) in enumerate(normalized_entries):
         if role not in {"system", "developer"}:
             last_index = index
-    if last_index < 0 or normalized_entries[last_index][0] != "user":
-        raise ValueError("The final OpenAI input item must be a user message.")
+    if last_index < 0 or normalized_entries[last_index][0] not in {"user", "tool"}:
+        raise ValueError("The final OpenAI input item must be a user message or function_call_output.")
 
     for index, (role, rendered_text, item_images) in enumerate(normalized_entries):
         if role in {"system", "developer"}:
@@ -364,7 +364,7 @@ def translate_responses_request(request: OpenAIResponsesRequest) -> TranslatedRe
             continue
         if index == last_index:
             prompt = rendered_text
-            current_images = list(item_images)
+            current_images = list(item_images) if role == "user" else []
             continue
         _append_history_turn(prior_turns, transcript_lines, role, rendered_text)
     additional_context: list[str] = []

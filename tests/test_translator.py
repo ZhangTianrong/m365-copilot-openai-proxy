@@ -374,3 +374,79 @@ def test_chat_and_responses_tool_history_normalize_to_same_hash() -> None:
     assert translated_chat.prior_turns == translated_responses.prior_turns
     assert translated_chat.prompt == translated_responses.prompt
     assert compute_prior_history_hash(translated_chat) == compute_prior_history_hash(translated_responses)
+
+
+def test_translate_responses_request_allows_final_function_call_output() -> None:
+    request = OpenAIResponsesRequest.model_validate(
+        {
+            "model": "m365-minis",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Earlier"}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "我来调用终端。"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "shell_execute",
+                    "arguments": '{"cmd":"pwd"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "name": "shell_execute",
+                    "output": "/workspace",
+                },
+            ],
+        }
+    )
+
+    translated = translate_responses_request(request)
+
+    assert translated.prompt.startswith("<proxy_tool_output>")
+    assert len(translated.prior_turns) == 2
+    assert translated.prior_turns[0].role == "user"
+    assert translated.prior_turns[1].role == "assistant"
+
+
+def test_translate_openai_request_allows_final_tool_message() -> None:
+    request = OpenAIChatRequest.model_validate(
+        {
+            "model": "m365-minis",
+            "messages": [
+                {"role": "user", "content": "Earlier"},
+                {
+                    "role": "assistant",
+                    "content": "我来调用终端。",
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {
+                                "name": "shell_execute",
+                                "arguments": '{"cmd":"pwd"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_123",
+                    "name": "shell_execute",
+                    "content": "/workspace",
+                },
+            ],
+        }
+    )
+
+    translated = translate_openai_request(request)
+
+    assert translated.prompt.startswith("<proxy_tool_output>")
+    assert len(translated.prior_turns) == 2
+    assert translated.prior_turns[0].role == "user"
+    assert translated.prior_turns[1].role == "assistant"
