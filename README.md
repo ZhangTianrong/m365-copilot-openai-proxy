@@ -2,7 +2,9 @@
 
 A local proxy server that exposes Microsoft 365 Copilot as OpenAI-compatible and Anthropic-compatible APIs. No Azure app registration or admin consent required.
 
-This repository is now a fork with behavior that intentionally diverges from the upstream project. The source of truth is the code in this repo and the constraints documented below, not upstream README text or examples.
+![`m365-minis` profile screenshot](docs/images/m365-minis.png)
+
+`m365-minis` is a customization profile layered on top of the normal Copilot transport. It injects a hidden Minis-specific instruction on the way in, then converts a trailing embedded JSON `function_call` array from Copilot's reply into structured OpenAI-style tool calls on the way out.
 
 ## How it works
 
@@ -41,6 +43,7 @@ The proxy connects to `substrate.office.com` — the same WebSocket API the M365
 
 ## Proxy Profiles
 
+- Screenshot note: the image above shows the `m365-minis` flow in practice. Copilot emits a plain-text reply that ends with a JSON tool-call payload, and the proxy turns that suffix into structured tool-call output for compatible OpenAI clients.
 - `/v1/models` exposes two public aliases: `m365-copilot` and `m365-minis`.
 - `m365-copilot` is the base profile. It keeps the current behavior and returns Copilot text directly.
 - `m365-minis` uses the same underlying Copilot transport, auth, model probing, and Copilot model selection settings as `m365-copilot`.
