@@ -99,7 +99,7 @@ def test_models_endpoint(tmp_path) -> None:
     response = client.get("/v1/models")
     assert response.status_code == 200
     body = response.json()
-    assert body["data"][0]["id"] == "m365-copilot"
+    assert [item["id"] for item in body["data"]] == ["m365-copilot", "m365-minis"]
 
 
 def test_models_endpoint_stays_model_alias_when_copilot_model_selected(tmp_path) -> None:
@@ -111,7 +111,7 @@ def test_models_endpoint_stays_model_alias_when_copilot_model_selected(tmp_path)
     response = client.get("/v1/models")
     assert response.status_code == 200
     body = response.json()
-    assert body["data"][0]["id"] == "m365-copilot"
+    assert [item["id"] for item in body["data"]] == ["m365-copilot", "m365-minis"]
 
 
 def test_conversation_reuse_is_unchanged_by_selected_copilot_model(tmp_path) -> None:
@@ -241,6 +241,125 @@ def test_openai_streaming_returns_sse(tmp_path) -> None:
     assert '"content": "hello"' in payload
     assert '"content": " world"' in payload
     assert "data: [DONE]" in payload
+
+
+def test_m365_minis_chat_completion_returns_structured_tool_calls(tmp_path) -> None:
+    fake = FakeCopilotClient(
+        text_response=(
+            "我来调用终端工具。\n\n"
+            '[{"type":"function_call","call_id":"call_123","name":"shell_execute","arguments":"{\\"cmd\\":\\"pwd\\"}"}]'
+        )
+    )
+    client = build_client(fake, tmp_path)
+    response = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m365-minis",
+            "messages": [{"role": "user", "content": "Probe the terminal"}],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "m365-minis"
+    choice = body["choices"][0]
+    assert choice["finish_reason"] == "tool_calls"
+    assert choice["message"]["content"] == "我来调用终端工具。"
+    assert choice["message"]["tool_calls"] == [
+        {
+            "id": "call_123",
+            "type": "function",
+            "function": {
+                "name": "shell_execute",
+                "arguments": '{"cmd":"pwd"}',
+            },
+        }
+    ]
+    assert "Minis 系统" in fake.calls[0]["additional_context"][0]
+
+
+def test_m365_minis_responses_returns_function_call_items(tmp_path) -> None:
+    fake = FakeCopilotClient(
+        text_response=(
+            "先看一下目录。\n\n"
+            '[{"type":"function_call","call_id":"call_123","name":"shell_execute","arguments":"{\\"cmd\\":\\"ls\\"}"}]'
+        )
+    )
+    client = build_client(fake, tmp_path)
+    response = client.post(
+        "/v1/responses",
+        json={
+            "model": "m365-minis",
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "List files"}]}],
+        },
+    )
+    assert response.status_code == 200
+    body = response.json()
+    assert body["model"] == "m365-minis"
+    assert body["output"][0]["type"] == "message"
+    assert body["output"][0]["content"][0]["text"] == "先看一下目录。"
+    assert body["output"][1] == {
+        "type": "function_call",
+        "call_id": "call_123",
+        "name": "shell_execute",
+        "arguments": '{"cmd":"ls"}',
+    }
+
+
+def test_m365_minis_chat_streaming_buffers_and_emits_tool_calls(tmp_path) -> None:
+    fake = FakeCopilotClient(
+        stream_chunks=[
+            "准备调用工具。",
+            '\n\n[{"type":"function_call","call_id":"call_123","name":"shell_execute","arguments":"{\\"cmd\\":\\"uname\\"}"}]',
+        ]
+    )
+    client = build_client(fake, tmp_path)
+    with client.stream(
+        "POST",
+        "/v1/chat/completions",
+        json={
+            "model": "m365-minis",
+            "stream": True,
+            "messages": [{"role": "user", "content": "Inspect system"}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+    assert response.status_code == 200
+    assert '"model": "m365-minis"' in payload
+    assert '"content": "\\u51c6\\u5907\\u8c03\\u7528\\u5de5\\u5177\\u3002"' in payload
+    assert '"tool_calls": [{"id": "call_123", "type": "function", "function": {"name": "shell_execute", "arguments": "{\\"cmd\\":\\"uname\\"}"}, "index": 0}]' in payload
+    assert '"finish_reason": "tool_calls"' in payload
+
+
+def test_m365_minis_responses_streaming_buffers_and_emits_function_calls(tmp_path) -> None:
+    fake = FakeCopilotClient(
+        stream_chunks=[
+            "先执行命令。",
+            '\n\n[{"type":"function_call","call_id":"call_123","name":"shell_execute","arguments":"{\\"cmd\\":\\"date\\"}"}]',
+        ]
+    )
+    client = build_client(fake, tmp_path)
+    with client.stream(
+        "POST",
+        "/v1/responses",
+        json={
+            "model": "m365-minis",
+            "stream": True,
+            "input": [{"role": "user", "content": [{"type": "input_text", "text": "Get date"}]}],
+        },
+    ) as response:
+        payload = "".join(
+            chunk.decode("utf-8") if isinstance(chunk, bytes) else chunk
+            for chunk in response.iter_text()
+        )
+    assert response.status_code == 200
+    assert '"model": "m365-minis"' in payload
+    assert '"type": "response.output_item.added"' in payload
+    assert '"call_id": "call_123"' in payload
+    assert '"name": "shell_execute"' in payload
+    assert '"arguments": "{\\"cmd\\":\\"date\\"}"' in payload
 
 
 def test_openai_chat_completion_drops_remote_image_urls(tmp_path) -> None:
@@ -542,6 +661,57 @@ def test_reuse_enabled_reuses_latest_history_key_for_same_user(tmp_path) -> None
     assert second_call["is_start_of_session"] is False
     assert second_call["prompt"] == "Follow up"
     assert second_call["additional_context"] == []
+
+
+def test_m365_minis_reuse_matches_structured_tool_call_history(tmp_path) -> None:
+    fake = FakeCopilotClient(
+        text_response=(
+            "我来调用终端。\n\n"
+            '[{"type":"function_call","call_id":"call_123","name":"shell_execute","arguments":"{\\"cmd\\":\\"pwd\\"}"}]'
+        )
+    )
+    client = build_client(fake, tmp_path, enable_reuse=True)
+
+    first = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m365-minis",
+            "messages": [{"role": "user", "content": "Probe the terminal"}],
+            "user": "alice",
+        },
+    )
+    assert first.status_code == 200
+    first_call = fake.calls[0]
+
+    second = client.post(
+        "/v1/chat/completions",
+        json={
+            "model": "m365-minis",
+            "messages": [
+                {"role": "user", "content": "Probe the terminal"},
+                {
+                    "role": "assistant",
+                    "content": "我来调用终端。",
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {
+                                "name": "shell_execute",
+                                "arguments": '{"cmd":"pwd"}',
+                            },
+                        }
+                    ],
+                },
+                {"role": "user", "content": "Continue"},
+            ],
+            "user": "alice",
+        },
+    )
+    assert second.status_code == 200
+    second_call = fake.calls[1]
+    assert second_call["conversation_id"] == first_call["conversation_id"]
+    assert second_call["is_start_of_session"] is False
 
 
 def test_debug_logging_reports_request_and_sanitized_images(tmp_path, caplog) -> None:

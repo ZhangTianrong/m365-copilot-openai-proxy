@@ -241,6 +241,10 @@ class ConversationReuseService:
         *,
         scope_user: str | None,
     ) -> PreparedConversationTurn:
+        combined_additional_context = [
+            *translated.transport_additional_context,
+            *translated.additional_context,
+        ]
         if not self._enabled:
             return PreparedConversationTurn(
                 conversation_id=str(uuid.uuid4()),
@@ -248,7 +252,7 @@ class ConversationReuseService:
                 is_start_of_session=True,
                 routing_mode="stateless_disabled",
                 prompt=translated.prompt,
-                additional_context=translated.additional_context,
+                additional_context=combined_additional_context,
                 attachments=translated.attachments,
                 translated=translated,
                 scope_user=scope_user,
@@ -263,7 +267,7 @@ class ConversationReuseService:
                 is_start_of_session=True,
                 routing_mode="stateless_miss",
                 prompt=translated.prompt,
-                additional_context=translated.additional_context,
+                additional_context=combined_additional_context,
                 attachments=translated.attachments,
                 translated=translated,
                 scope_user=scope_user,

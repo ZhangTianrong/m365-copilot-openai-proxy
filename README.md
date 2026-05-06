@@ -22,7 +22,8 @@ The proxy connects to `substrate.office.com` — the same WebSocket API the M365
 - By default, each request starts a new Copilot conversation.
 - Optional conversation reuse can be enabled globally to continue the latest matching conversation state from a local SQLite cache.
 - System prompts and conversation history are folded into the message as plain text.
-- Tool calls and token usage are not supported.
+- `m365-copilot` itself does not support native tool use translation. A second proxy profile, `m365-minis`, can normalize a trailing embedded JSON `function_call` array into OpenAI-style tool-call output for Chat Completions and Responses.
+- Token usage is not supported.
 - The public attachment surface is image-only. Explicit `file` / `input_file` parts are ignored.
 - Remote image URLs are not fetched. Only `data:image/...;base64,...` parts are accepted.
 - **Claude Code:** Agentic features (file reading, bash, code editing) require tool use, which this proxy does not support. Use the proxy for general Q&A only; keep Claude Code on the real Anthropic API for coding tasks.
@@ -37,6 +38,18 @@ The proxy connects to `substrate.office.com` — the same WebSocket API the M365
 - Earlier user-message images are still represented in the reconstructed plain-text transcript as `[Image N]` markers.
 - Explicit non-image file parts, remote image URLs, and unsupported image shapes are ignored instead of failing the whole request.
 - Anthropic-style requests remain text-only from the public API perspective. Non-text attachment parts are dropped.
+
+## Proxy Profiles
+
+- `/v1/models` exposes two public aliases: `m365-copilot` and `m365-minis`.
+- `m365-copilot` is the base profile. It keeps the current behavior and returns Copilot text directly.
+- `m365-minis` uses the same underlying Copilot transport, auth, model probing, and Copilot model selection settings as `m365-copilot`.
+- `m365-minis` adds a hidden Minis-specific system instruction before the request is sent to Copilot.
+- If Copilot ends its reply with a JSON array of OpenAI Responses-style `function_call` items, `m365-minis` strips that suffix from the visible assistant prose and returns structured tool calls instead:
+  - Chat Completions returns `tool_calls` with `finish_reason: "tool_calls"`.
+  - Responses returns `function_call` output items.
+- `m365-minis` streaming is normalized after the full Copilot reply is buffered, so correctness is favored over token-by-token latency.
+- Anthropic `/v1/messages` does not use this customization layer.
 
 ---
 

@@ -1,0 +1,50 @@
+from __future__ import annotations
+
+from m365_copilot_openai_proxy.proxy_profiles import (
+    canonicalize_assistant_turn,
+    list_public_model_ids,
+    postprocess_assistant_text,
+    resolve_proxy_profile,
+)
+
+
+def test_list_public_model_ids_includes_minis_once() -> None:
+    assert list_public_model_ids("m365-copilot") == ["m365-copilot", "m365-minis"]
+
+
+def test_base_profile_leaves_embedded_json_untouched() -> None:
+    profile = resolve_proxy_profile("m365-copilot", "m365-copilot")
+    result = profile.postprocess_assistant_text(
+        'plain text\n\n[{"type":"function_call","call_id":"call_1","name":"shell_execute","arguments":"{}"}]'
+    )
+
+    assert result.visible_text.startswith("plain text")
+    assert result.tool_calls == ()
+
+
+def test_postprocess_extracts_only_trailing_function_call_array() -> None:
+    result = postprocess_assistant_text(
+        '先解释一下。\n\n[{"type":"function_call","call_id":"call_1","name":"shell_execute","arguments":"{}"}]'
+    )
+
+    assert result.visible_text == "先解释一下。"
+    assert len(result.tool_calls) == 1
+    assert result.history_text == canonicalize_assistant_turn(
+        "先解释一下。",
+        [
+            {
+                "type": "function_call",
+                "call_id": "call_1",
+                "name": "shell_execute",
+                "arguments": "{}",
+            }
+        ],
+    )
+
+
+def test_postprocess_ignores_malformed_trailing_array() -> None:
+    text = '先解释一下。\n\n[{"type":"not_function_call","call_id":"call_1"}]'
+    result = postprocess_assistant_text(text)
+
+    assert result.visible_text == text
+    assert result.tool_calls == ()

@@ -25,6 +25,12 @@ from .models import (
     OpenAIChatRequest,
     OpenAIResponsesRequest,
 )
+from .proxy_profiles import (
+    AssistantPostprocessResult,
+    ProxyProfile,
+    list_public_model_ids,
+    resolve_proxy_profile,
+)
 from .translator import (
     translate_anthropic_request,
     translate_openai_request,
@@ -97,10 +103,11 @@ def create_app(
             "object": "list",
             "data": [
                 {
-                    "id": settings.model_alias,
+                    "id": model_id,
                     "object": "model",
                     "owned_by": "microsoft-365-copilot",
                 }
+                for model_id in list_public_model_ids(settings.model_alias)
             ],
         }
 
@@ -115,7 +122,8 @@ def create_app(
         try:
             raw_body = await raw.json()
             _log_request_debug(settings, "chat.completions", raw_body)
-            translated = translate_openai_request(request)
+            profile = resolve_proxy_profile(request.model, settings.model_alias)
+            translated = profile.preprocess_translated(translate_openai_request(request))
             turn = conversation_reuse.prepare_turn(
                 translated,
                 scope_user=request.user,
@@ -124,7 +132,7 @@ def create_app(
             if request.stream:
                 return StreamingResponse(
                     _openai_stream(
-                        settings.model_alias,
+                        profile,
                         settings,
                         client,
                         conversation_reuse,
@@ -142,9 +150,10 @@ def create_app(
                 is_start_of_session=turn.is_start_of_session,
                 transport_state=transport_state,
             )
+            assistant = profile.postprocess_assistant_text(text)
             conversation_reuse.complete_turn(
                 turn,
-                text,
+                assistant.history_text,
                 resolved_conversation_id=transport_state.conversation_id,
                 resolved_transport_session_id=transport_state.session_id,
             )
@@ -156,6 +165,8 @@ def create_app(
                 routing_mode=turn.routing_mode,
                 assistant_preview=_sanitize_debug_value(text),
                 assistant_length=len(text),
+                public_model=profile.public_model_id,
+                tool_call_count=len(assistant.tool_calls),
             )
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
@@ -176,13 +187,9 @@ def create_app(
             "id": f"chatcmpl_{uuid.uuid4().hex}",
             "object": "chat.completion",
             "created": int(time.time()),
-            "model": settings.model_alias,
+            "model": profile.public_model_id,
             "choices": [
-                {
-                    "index": 0,
-                    "message": {"role": "assistant", "content": text},
-                    "finish_reason": "stop",
-                }
+                _build_chat_completion_choice(assistant)
             ],
         })
 
@@ -197,7 +204,8 @@ def create_app(
         try:
             _log_request_debug(settings, "responses", body)
             request = OpenAIResponsesRequest.model_validate(body)
-            translated = translate_responses_request(request)
+            profile = resolve_proxy_profile(request.model, settings.model_alias)
+            translated = profile.preprocess_translated(translate_responses_request(request))
             turn = conversation_reuse.prepare_turn(translated, scope_user=None)
             _log_translation_debug(settings, "responses", translated, turn)
         except ValueError as exc:
@@ -206,7 +214,7 @@ def create_app(
         if request.stream:
             return StreamingResponse(
                 _responses_stream(
-                    settings.model_alias,
+                    profile,
                     settings,
                     client,
                     conversation_reuse,
@@ -226,9 +234,10 @@ def create_app(
                 is_start_of_session=turn.is_start_of_session,
                 transport_state=transport_state,
             )
+            assistant = profile.postprocess_assistant_text(text)
             conversation_reuse.complete_turn(
                 turn,
-                text,
+                assistant.history_text,
                 resolved_conversation_id=transport_state.conversation_id,
                 resolved_transport_session_id=transport_state.session_id,
             )
@@ -240,6 +249,8 @@ def create_app(
                 routing_mode=turn.routing_mode,
                 assistant_preview=_sanitize_debug_value(text),
                 assistant_length=len(text),
+                public_model=profile.public_model_id,
+                tool_call_count=len(assistant.tool_calls),
             )
         except SubstrateCopilotError as exc:
             conversation_reuse.abort_turn(turn)
@@ -257,13 +268,8 @@ def create_app(
             "id": f"resp_{uuid.uuid4().hex}",
             "object": "response",
             "created_at": int(time.time()),
-            "model": settings.model_alias,
-            "output": [{
-                "type": "message",
-                "id": f"msg_{uuid.uuid4().hex}",
-                "role": "assistant",
-                "content": [{"type": "output_text", "text": text}],
-            }],
+            "model": profile.public_model_id,
+            "output": _build_responses_output(assistant),
             "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
         })
 
@@ -425,6 +431,9 @@ def _log_translation_debug(
         reuse_enabled=turn.routing_mode != "stateless_disabled",
         prompt=_sanitize_debug_value(translated.prompt),
         additional_context=_sanitize_debug_value(translated.additional_context),
+        transport_additional_context=_sanitize_debug_value(
+            translated.transport_additional_context
+        ),
         system_text=_sanitize_debug_value(translated.system_text),
         prior_turn_count=len(translated.prior_turns),
         prior_turns=[
@@ -438,8 +447,62 @@ def _log_translation_debug(
     )
 
 
+def _build_chat_completion_choice(assistant: AssistantPostprocessResult) -> dict[str, Any]:
+    message: dict[str, Any] = {
+        "role": "assistant",
+        "content": assistant.visible_text if assistant.has_tool_calls else assistant.raw_text,
+    }
+    if assistant.has_tool_calls:
+        message["content"] = assistant.visible_text or None
+        message["tool_calls"] = [
+            tool_call.to_chat_tool_call()
+            for tool_call in assistant.tool_calls
+        ]
+    return {
+        "index": 0,
+        "message": message,
+        "finish_reason": "tool_calls" if assistant.has_tool_calls else "stop",
+    }
+
+
+def _build_responses_output(assistant: AssistantPostprocessResult) -> list[dict[str, Any]]:
+    output: list[dict[str, Any]] = []
+    visible_text = assistant.visible_text if assistant.has_tool_calls else assistant.raw_text
+    if visible_text:
+        output.append(
+            {
+                "type": "message",
+                "id": f"msg_{uuid.uuid4().hex}",
+                "role": "assistant",
+                "content": [{"type": "output_text", "text": visible_text}],
+            }
+        )
+    if assistant.has_tool_calls:
+        output.extend(tool_call.to_responses_item() for tool_call in assistant.tool_calls)
+    return output
+
+
+async def _collect_stream_text(
+    client: SubstrateCopilotClient,
+    turn: PreparedConversationTurn,
+    transport_state: ConversationTransportState,
+) -> str:
+    full_text = ""
+    async for delta in client.chat_stream(
+        turn.prompt,
+        turn.additional_context,
+        turn.attachments,
+        conversation_id=turn.conversation_id,
+        transport_session_id=turn.transport_session_id,
+        is_start_of_session=turn.is_start_of_session,
+        transport_state=transport_state,
+    ):
+        full_text += delta
+    return full_text
+
+
 async def _openai_stream(
-    model_alias: str,
+    profile: ProxyProfile,
     settings: Settings,
     client: SubstrateCopilotClient,
     conversation_reuse: ConversationReuseService,
@@ -448,16 +511,46 @@ async def _openai_stream(
     completion_id = f"chatcmpl_{uuid.uuid4().hex}"
     created = int(time.time())
     transport_state = ConversationTransportState()
-    first_chunk = {
-        "id": completion_id,
-        "object": "chat.completion.chunk",
-        "created": created,
-        "model": model_alias,
-        "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
-    }
-    yield f"data: {json.dumps(first_chunk)}\n\n"
-    full_text = ""
     try:
+        if profile.buffered_streaming:
+            full_text = await _collect_stream_text(client, turn, transport_state)
+            assistant = profile.postprocess_assistant_text(full_text)
+            yield f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': profile.public_model_id, 'choices': [{'index': 0, 'delta': {'role': 'assistant'}, 'finish_reason': None}]})}\n\n"
+            if assistant.visible_text:
+                yield f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': profile.public_model_id, 'choices': [{'index': 0, 'delta': {'content': assistant.visible_text}, 'finish_reason': None}]})}\n\n"
+            for index, tool_call in enumerate(assistant.tool_calls):
+                yield f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': profile.public_model_id, 'choices': [{'index': 0, 'delta': {'tool_calls': [tool_call.to_chat_tool_call(index=index)]}, 'finish_reason': None}]})}\n\n"
+            final_reason = "tool_calls" if assistant.has_tool_calls else "stop"
+            conversation_reuse.complete_turn(
+                turn,
+                assistant.history_text,
+                resolved_conversation_id=transport_state.conversation_id,
+                resolved_transport_session_id=transport_state.session_id,
+            )
+            _emit_debug_log(
+                settings,
+                "turn.completed",
+                endpoint="chat.completions",
+                conversation_id=turn.conversation_id,
+                routing_mode=turn.routing_mode,
+                assistant_preview=_sanitize_debug_value(full_text),
+                assistant_length=len(full_text),
+                public_model=profile.public_model_id,
+                tool_call_count=len(assistant.tool_calls),
+            )
+            yield f"data: {json.dumps({'id': completion_id, 'object': 'chat.completion.chunk', 'created': created, 'model': profile.public_model_id, 'choices': [{'index': 0, 'delta': {}, 'finish_reason': final_reason}]})}\n\n"
+            yield "data: [DONE]\n\n"
+            return
+
+        first_chunk = {
+            "id": completion_id,
+            "object": "chat.completion.chunk",
+            "created": created,
+            "model": profile.public_model_id,
+            "choices": [{"index": 0, "delta": {"role": "assistant"}, "finish_reason": None}],
+        }
+        yield f"data: {json.dumps(first_chunk)}\n\n"
+        full_text = ""
         async for delta in client.chat_stream(
             turn.prompt,
             turn.additional_context,
@@ -472,7 +565,7 @@ async def _openai_stream(
                 "id": completion_id,
                 "object": "chat.completion.chunk",
                 "created": created,
-                "model": model_alias,
+                "model": profile.public_model_id,
                 "choices": [{"index": 0, "delta": {"content": delta}, "finish_reason": None}],
             }
             yield f"data: {json.dumps(chunk)}\n\n"
@@ -491,7 +584,7 @@ async def _openai_stream(
         "id": completion_id,
         "object": "chat.completion.chunk",
         "created": created,
-        "model": model_alias,
+        "model": profile.public_model_id,
         "choices": [{"index": 0, "delta": {}, "finish_reason": "stop"}],
     }
     conversation_reuse.complete_turn(
@@ -508,29 +601,60 @@ async def _openai_stream(
         routing_mode=turn.routing_mode,
         assistant_preview=_sanitize_debug_value(full_text),
         assistant_length=len(full_text),
+        public_model=profile.public_model_id,
+        tool_call_count=0,
     )
     yield f"data: {json.dumps(final_chunk)}\n\n"
     yield "data: [DONE]\n\n"
 
 
 async def _responses_stream(
-    model_alias: str,
+    profile: ProxyProfile,
     settings: Settings,
     client: SubstrateCopilotClient,
     conversation_reuse: ConversationReuseService,
     turn: PreparedConversationTurn,
 ) -> AsyncIterator[str]:
     resp_id = f"resp_{uuid.uuid4().hex}"
-    item_id = f"msg_{uuid.uuid4().hex}"
     created = int(time.time())
     transport_state = ConversationTransportState()
-
-    yield f"data: {json.dumps({'type': 'response.created', 'response': {'id': resp_id, 'object': 'response', 'created_at': created, 'model': model_alias, 'status': 'in_progress', 'output': []}})}\n\n"
-    yield f"data: {json.dumps({'type': 'response.output_item.added', 'output_index': 0, 'item': {'id': item_id, 'type': 'message', 'role': 'assistant', 'content': []}})}\n\n"
-    yield f"data: {json.dumps({'type': 'response.content_part.added', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': ''}})}\n\n"
-
-    full_text = ""
     try:
+        if profile.buffered_streaming:
+            full_text = await _collect_stream_text(client, turn, transport_state)
+            assistant = profile.postprocess_assistant_text(full_text)
+            output = _build_responses_output(assistant)
+            yield f"data: {json.dumps({'type': 'response.created', 'response': {'id': resp_id, 'object': 'response', 'created_at': created, 'model': profile.public_model_id, 'status': 'in_progress', 'output': []}})}\n\n"
+            for output_index, item in enumerate(output):
+                yield f"data: {json.dumps({'type': 'response.output_item.added', 'output_index': output_index, 'item': item})}\n\n"
+                if item["type"] == "message":
+                    part = item["content"][0]
+                    yield f"data: {json.dumps({'type': 'response.content_part.added', 'item_id': item['id'], 'output_index': output_index, 'content_index': 0, 'part': part})}\n\n"
+                    yield f"data: {json.dumps({'type': 'response.output_text.done', 'item_id': item['id'], 'output_index': output_index, 'content_index': 0, 'text': part['text']})}\n\n"
+            conversation_reuse.complete_turn(
+                turn,
+                assistant.history_text,
+                resolved_conversation_id=transport_state.conversation_id,
+                resolved_transport_session_id=transport_state.session_id,
+            )
+            _emit_debug_log(
+                settings,
+                "turn.completed",
+                endpoint="responses",
+                conversation_id=turn.conversation_id,
+                routing_mode=turn.routing_mode,
+                assistant_preview=_sanitize_debug_value(full_text),
+                assistant_length=len(full_text),
+                public_model=profile.public_model_id,
+                tool_call_count=len(assistant.tool_calls),
+            )
+            yield f"data: {json.dumps({'type': 'response.completed', 'response': {'id': resp_id, 'object': 'response', 'created_at': created, 'model': profile.public_model_id, 'status': 'completed', 'output': output, 'usage': {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}}})}\n\n"
+            return
+
+        item_id = f"msg_{uuid.uuid4().hex}"
+        yield f"data: {json.dumps({'type': 'response.created', 'response': {'id': resp_id, 'object': 'response', 'created_at': created, 'model': profile.public_model_id, 'status': 'in_progress', 'output': []}})}\n\n"
+        yield f"data: {json.dumps({'type': 'response.output_item.added', 'output_index': 0, 'item': {'id': item_id, 'type': 'message', 'role': 'assistant', 'content': []}})}\n\n"
+        yield f"data: {json.dumps({'type': 'response.content_part.added', 'item_id': item_id, 'output_index': 0, 'content_index': 0, 'part': {'type': 'output_text', 'text': ''}})}\n\n"
+        full_text = ""
         async for delta in client.chat_stream(
             turn.prompt,
             turn.additional_context,
@@ -569,8 +693,10 @@ async def _responses_stream(
         routing_mode=turn.routing_mode,
         assistant_preview=_sanitize_debug_value(full_text),
         assistant_length=len(full_text),
+        public_model=profile.public_model_id,
+        tool_call_count=0,
     )
-    yield f"data: {json.dumps({'type': 'response.completed', 'response': {'id': resp_id, 'object': 'response', 'created_at': created, 'model': model_alias, 'status': 'completed', 'output': [{'id': item_id, 'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': full_text}]}], 'usage': {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}}})}\n\n"
+    yield f"data: {json.dumps({'type': 'response.completed', 'response': {'id': resp_id, 'object': 'response', 'created_at': created, 'model': profile.public_model_id, 'status': 'completed', 'output': [{'id': item_id, 'type': 'message', 'role': 'assistant', 'content': [{'type': 'output_text', 'text': full_text}]}], 'usage': {'input_tokens': 0, 'output_tokens': 0, 'total_tokens': 0}}})}\n\n"
 
 
 async def _anthropic_stream(

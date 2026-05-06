@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from m365_copilot_openai_proxy.models import OpenAIChatRequest, OpenAIResponsesRequest
+from m365_copilot_openai_proxy.proxy_profiles import resolve_proxy_profile
 from m365_copilot_openai_proxy.translator import translate_openai_request, translate_responses_request
 from m365_copilot_openai_proxy.conversation_reuse import (
     compute_advanced_history_hash,
@@ -277,6 +278,99 @@ def test_openai_and_responses_translate_to_same_canonical_history() -> None:
     translated_responses = translate_responses_request(responses_request)
 
     assert translated_chat.system_text == translated_responses.system_text
+    assert translated_chat.prior_turns == translated_responses.prior_turns
+    assert translated_chat.prompt == translated_responses.prompt
+    assert compute_prior_history_hash(translated_chat) == compute_prior_history_hash(translated_responses)
+
+
+def test_preprocess_injects_transport_context_without_changing_history_hash() -> None:
+    request = OpenAIChatRequest.model_validate(
+        {
+            "model": "m365-minis",
+            "messages": [
+                {"role": "system", "content": "Be concise."},
+                {"role": "user", "content": "Earlier"},
+                {"role": "assistant", "content": "Reply"},
+                {"role": "user", "content": "Next"},
+            ],
+        }
+    )
+
+    translated = translate_openai_request(request)
+    profile = resolve_proxy_profile("m365-minis", "m365-copilot")
+    preprocessed = profile.preprocess_translated(translated)
+
+    assert translated.transport_additional_context == []
+    assert preprocessed.transport_additional_context
+    assert compute_prior_history_hash(translated) == compute_prior_history_hash(preprocessed)
+
+
+def test_chat_and_responses_tool_history_normalize_to_same_hash() -> None:
+    chat_request = OpenAIChatRequest.model_validate(
+        {
+            "model": "m365-minis",
+            "messages": [
+                {"role": "user", "content": "Earlier"},
+                {
+                    "role": "assistant",
+                    "content": "我来调用终端。",
+                    "tool_calls": [
+                        {
+                            "id": "call_123",
+                            "type": "function",
+                            "function": {
+                                "name": "shell_execute",
+                                "arguments": '{"cmd":"pwd"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "tool",
+                    "tool_call_id": "call_123",
+                    "name": "shell_execute",
+                    "content": "/workspace",
+                },
+                {"role": "user", "content": "Continue"},
+            ],
+        }
+    )
+    responses_request = OpenAIResponsesRequest.model_validate(
+        {
+            "model": "m365-minis",
+            "input": [
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Earlier"}],
+                },
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "我来调用终端。"}],
+                },
+                {
+                    "type": "function_call",
+                    "call_id": "call_123",
+                    "name": "shell_execute",
+                    "arguments": '{"cmd":"pwd"}',
+                },
+                {
+                    "type": "function_call_output",
+                    "call_id": "call_123",
+                    "name": "shell_execute",
+                    "output": "/workspace",
+                },
+                {
+                    "role": "user",
+                    "content": [{"type": "input_text", "text": "Continue"}],
+                },
+            ],
+        }
+    )
+
+    translated_chat = translate_openai_request(chat_request)
+    translated_responses = translate_responses_request(responses_request)
+
     assert translated_chat.prior_turns == translated_responses.prior_turns
     assert translated_chat.prompt == translated_responses.prompt
     assert compute_prior_history_hash(translated_chat) == compute_prior_history_hash(translated_responses)
