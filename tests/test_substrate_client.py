@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 
 import httpx
 
@@ -71,6 +72,53 @@ def build_enterprise_snapshot_client(*, search_access_token: str | None = None) 
         ),
         "America/New_York",
     )
+
+
+def test_personal_client_ignores_stale_primary_expiry_when_upload_tokens_are_fresh() -> None:
+    now = int(time.time())
+    client = SubstrateCopilotClient(
+        AuthSessionSnapshot(
+            account_mode="personal",
+            access_token="stale-primary-token",
+            expires_at=now - 3600,
+            captured_at=123,
+            oid="00000000-0000-0000-853e-527a6bf3c11e",
+            tid="84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa",
+            websocket_url=(
+                "wss://substrate.office.com/m365Copilot/Chathub/"
+                "00000000-0000-0000-853e-527a6bf3c11e@84df9e7f-e9f6-40af-b435-aaaaaaaaaaaa"
+                "?access_token=eyJhbGciOiJkaXIifQ.test.encrypted.value.more"
+            ),
+            graph_access_token="fresh-graph-token",
+            graph_expires_at=now + 3600,
+            search_access_token="fresh-search-token",
+            search_expires_at=now + 7200,
+        ),
+        "America/New_York",
+    )
+
+    assert client._graph_token == "fresh-graph-token"
+    assert client._search_token == "fresh-search-token"
+
+
+def test_enterprise_client_still_rejects_expired_snapshot() -> None:
+    now = int(time.time())
+    try:
+        SubstrateCopilotClient(
+            AuthSessionSnapshot(
+                account_mode="enterprise",
+                access_token=_TEST_JWT,
+                expires_at=now - 3600,
+                captured_at=123,
+                oid="12345678-1234-1234-1234-1234567890ab",
+                tid="abcdef01-2345-6789-abcd-ef0123456789",
+            ),
+            "America/New_York",
+        )
+    except RuntimeError as exc:
+        assert "Access token expired" in str(exc)
+    else:
+        raise AssertionError("Expected expired enterprise snapshot to be rejected.")
 
 
 def test_chat_invoke_includes_image_annotations() -> None:

@@ -52,10 +52,10 @@ _STORAGE_JS = """
 """
 
 _GRAPH_TOKEN_JS = """
-async () => {
+async ({ scope, clientId }) => {
     const service = window.nestedAppAuthService;
-    const clientId = service?.authOptions?.aadAppId || window.msal?.clientIds?.[0];
-    if (!service || !clientId || typeof service.handleRequest !== "function") {
+    const resolvedClientId = clientId || service?.authOptions?.aadAppId || window.msal?.clientIds?.[0];
+    if (!service || !resolvedClientId || typeof service.handleRequest !== "function") {
         return null;
     }
     try {
@@ -64,8 +64,8 @@ async () => {
                 requestId: "codex-graph-token",
                 method: "GetToken",
                 tokenParams: {
-                    clientId,
-                    scope: "https://graph.microsoft.com/.default",
+                    clientId: resolvedClientId,
+                    scope,
                     correlationId: "codex-graph-token",
                     forceRefresh: false,
                 },
@@ -87,41 +87,7 @@ async () => {
 }
 """
 
-_SEARCH_TOKEN_JS = """
-async (scope) => {
-    const service = window.nestedAppAuthService;
-    const clientId = service?.authOptions?.aadAppId || window.msal?.clientIds?.[0];
-    if (!service || !clientId || typeof service.handleRequest !== "function") {
-        return null;
-    }
-    try {
-        const result = await service.handleRequest(
-            {
-                requestId: "codex-search-token",
-                method: "GetToken",
-                tokenParams: {
-                    clientId,
-                    scope,
-                    correlationId: "codex-search-token",
-                    forceRefresh: false,
-                },
-            },
-            new URL(window.location.href),
-        );
-        const token = result?.token?.access_token;
-        const expiresIn = result?.token?.expires_in;
-        if (typeof token !== "string" || !token) {
-            return null;
-        }
-        return {
-            access_token: token,
-            expires_in: typeof expiresIn === "number" ? expiresIn : Number(expiresIn || 0),
-        };
-    } catch {
-        return null;
-    }
-}
-"""
+_PERSONAL_UPLOAD_CLIENT_ID = "c0ab8ce9-e9a0-42e7-b064-33d422df41f1"
 
 _PERSONAL_SUBSTRATE_TOKEN_JS = """
 (() => {
@@ -341,9 +307,12 @@ def _should_accept_storage_record(settings: Settings, record: dict[str, object])
     return True
 
 
-async def _capture_graph_access_token(page) -> dict[str, object] | None:
+async def _capture_graph_access_token(page, *, client_id: str | None = None) -> dict[str, object] | None:
     try:
-        result = await page.evaluate(_GRAPH_TOKEN_JS)
+        result = await page.evaluate(
+            _GRAPH_TOKEN_JS,
+            {"scope": "https://graph.microsoft.com/.default", "clientId": client_id},
+        )
     except Exception:
         return None
     if not isinstance(result, dict):
@@ -365,9 +334,17 @@ async def _capture_search_access_token(page) -> dict[str, object] | None:
     )
 
 
-async def _capture_search_access_token_for_scope(page, scope: str) -> dict[str, object] | None:
+async def _capture_search_access_token_for_scope(
+    page,
+    scope: str,
+    *,
+    client_id: str | None = None,
+) -> dict[str, object] | None:
     try:
-        result = await page.evaluate(_SEARCH_TOKEN_JS, scope)
+        result = await page.evaluate(
+            _GRAPH_TOKEN_JS,
+            {"scope": scope, "clientId": client_id},
+        )
     except Exception:
         return None
     if not isinstance(result, dict):
@@ -778,7 +755,14 @@ async def open_authenticated_context(
                     if substrate_auth:
                         auth_data.update(substrate_auth)
                         snapshot = current_auth_snapshot() or snapshot
-                graph_auth = await _capture_graph_access_token(page)
+                graph_auth = await _capture_graph_access_token(
+                    page,
+                    client_id=(
+                        _PERSONAL_UPLOAD_CLIENT_ID
+                        if settings.account_mode == "personal"
+                        else None
+                    ),
+                )
                 if graph_auth:
                     auth_data.update(graph_auth)
                     _verbose_log(settings, "token.captured", source="graph_access_token")
@@ -787,6 +771,7 @@ async def open_authenticated_context(
                     search_auth = await _capture_search_access_token_for_scope(
                         page,
                         "https://substrate.office.com/.default",
+                        client_id=_PERSONAL_UPLOAD_CLIENT_ID,
                     )
                 else:
                     search_auth = await _capture_search_access_token(page)
@@ -800,6 +785,7 @@ async def open_authenticated_context(
                     "auth.ready",
                     account_mode=snapshot.account_mode,
                     expires_at=snapshot.expires_at,
+                    effective_expires_at=auth_session_expires_at(snapshot),
                     has_websocket_url=bool(snapshot.websocket_url),
                     has_graph_token=bool(snapshot.graph_access_token),
                     has_search_token=bool(snapshot.search_access_token),
@@ -815,7 +801,14 @@ async def open_authenticated_context(
                         auth_data.update(substrate_auth)
                         _verbose_log(settings, "token.captured", source="personal_storage_token")
                         snapshot = current_auth_snapshot() or snapshot
-                graph_auth = await _capture_graph_access_token(page)
+                graph_auth = await _capture_graph_access_token(
+                    page,
+                    client_id=(
+                        _PERSONAL_UPLOAD_CLIENT_ID
+                        if settings.account_mode == "personal"
+                        else None
+                    ),
+                )
                 if graph_auth:
                     auth_data.update(graph_auth)
                     _verbose_log(settings, "token.captured", source="graph_access_token")
@@ -824,6 +817,7 @@ async def open_authenticated_context(
                     search_auth = await _capture_search_access_token_for_scope(
                         page,
                         "https://substrate.office.com/.default",
+                        client_id=_PERSONAL_UPLOAD_CLIENT_ID,
                     )
                 else:
                     search_auth = await _capture_search_access_token(page)
@@ -837,6 +831,7 @@ async def open_authenticated_context(
                     "auth.ready",
                     account_mode=snapshot.account_mode,
                     expires_at=snapshot.expires_at,
+                    effective_expires_at=auth_session_expires_at(snapshot),
                     has_websocket_url=bool(snapshot.websocket_url),
                     has_graph_token=bool(snapshot.graph_access_token),
                     has_search_token=bool(snapshot.search_access_token),

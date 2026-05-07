@@ -162,3 +162,19 @@ def test_auth_session_expires_at_uses_earliest_graph_search_or_copilot_expiry() 
     auth_session.search_expires_at = 3900000000
 
     assert auth_session_expires_at(auth_session) == 3900000000
+
+
+def test_auth_session_expires_at_personal_prefers_graph_and_search_expiry() -> None:
+    auth_session = parse_websocket_url(_PERSONAL_WS_URL)
+    auth_session.expires_at = 3800000000
+    auth_session.graph_expires_at = 4100000000
+    auth_session.search_expires_at = 4000000000
+
+    assert auth_session_expires_at(auth_session) == 4000000000
+
+
+def test_auth_session_expires_at_personal_falls_back_to_primary_expiry_without_upload_tokens() -> None:
+    auth_session = parse_websocket_url(_PERSONAL_WS_URL)
+    auth_session.expires_at = 3800000000
+
+    assert auth_session_expires_at(auth_session) == 3800000000

@@ -7,6 +7,7 @@ from m365_copilot_openai_proxy.config import Settings
 from m365_copilot_openai_proxy.models import AuthSessionSnapshot
 from m365_copilot_openai_proxy.playwright_refresh import (
     AuthenticatedSessionState,
+    _PERSONAL_UPLOAD_CLIENT_ID,
     _advance_login_flow,
     _build_auth_snapshot,
     _capture_token,
@@ -27,6 +28,7 @@ class FakePage:
         self._evaluate_values = list(evaluate_values)
         self.events: dict[str, object] = {}
         self.goto_calls: list[tuple[str, str]] = []
+        self.evaluate_calls: list[tuple[str, tuple[object, ...]]] = []
         self.locator_calls: list[str] = []
         self.clicked_selectors: list[str] = []
         self.clicked_texts: list[str] = []
@@ -48,6 +50,7 @@ class FakePage:
         self.goto_calls.append((url, wait_until))
 
     async def evaluate(self, _script: str, *_args):
+        self.evaluate_calls.append((_script, _args))
         if self._evaluate_values:
             return self._evaluate_values.pop(0)
         return None
@@ -357,6 +360,20 @@ def test_open_authenticated_context_captures_personal_auth_snapshot(monkeypatch,
     assert auth_session.search_expires_at is not None
     assert auth_state.saw_login_host is True
     assert auth_state.detected_account_mode == "personal"
+    assert any(
+        args
+        and isinstance(args[0], dict)
+        and args[0].get("clientId") == _PERSONAL_UPLOAD_CLIENT_ID
+        and args[0].get("scope") == "https://graph.microsoft.com/.default"
+        for _script, args in page.evaluate_calls
+    )
+    assert any(
+        args
+        and isinstance(args[0], dict)
+        and args[0].get("clientId") == _PERSONAL_UPLOAD_CLIENT_ID
+        and args[0].get("scope") == "https://substrate.office.com/.default"
+        for _script, args in page.evaluate_calls
+    )
 
 
 def test_open_authenticated_context_accepts_personal_session_without_reauth(monkeypatch, tmp_path) -> None:

@@ -98,6 +98,17 @@ def token_needs_refresh(token: str, buffer_seconds: int) -> bool:
 
 
 def auth_session_expires_at(auth_session: AuthSessionSnapshot) -> int | None:
+    if auth_session.account_mode == "personal":
+        expirations = [
+            value
+            for value in (
+                auth_session.graph_expires_at,
+                auth_session.search_expires_at,
+            )
+            if value is not None
+        ]
+        if expirations:
+            return min(expirations)
     expirations = [
         value
         for value in (

@@ -20,7 +20,7 @@ from .models import (
     TranslatedAttachment,
     UploadedAttachment,
 )
-from .token_store import build_enterprise_auth_session
+from .token_store import auth_session_expires_at, build_enterprise_auth_session
 
 logger = logging.getLogger(__name__)
 
@@ -126,7 +126,8 @@ class SubstrateCopilotClient:
         self._token = auth_session.access_token
         self._graph_token = auth_session.graph_access_token or auth_session.access_token
         self._search_token = auth_session.search_access_token or auth_session.access_token
-        if auth_session.expires_at is not None and time.time() > auth_session.expires_at:
+        effective_expires_at = auth_session_expires_at(auth_session)
+        if effective_expires_at is not None and time.time() > effective_expires_at:
             raise SubstrateCopilotError(
                 "Access token expired. Refresh the shared token file with "
                 "`copilot-openai-proxy refresh-token` or restart the Playwright refresh daemon."
@@ -443,20 +444,35 @@ class SubstrateCopilotClient:
                     },
                     "CacheMode": "FireForget",
                 }
+                unfurl_headers = {
+                    **substrate_headers,
+                    "Content-Type": "application/json",
+                    "x-anchormailbox": f"Oid:{self._oid}@{self._tid}",
+                    "x-routingparameter-sessionkey": f"Oid:{self._oid}@{self._tid}",
+                    "client-request-id": client_request_id,
+                    "client-session-id": client_session_id,
+                    "x-client-language": "en-us",
+                    "x-client-localtime": datetime.now().astimezone().isoformat(timespec="milliseconds"),
+                }
                 unfurl_response = await client.post(
                     _PERSONAL_UNFURL_URL,
-                    headers={
-                        **substrate_headers,
-                        "Content-Type": "application/json",
-                        "x-anchormailbox": f"Oid:{self._oid}@{self._tid}",
-                        "x-routingparameter-sessionkey": f"Oid:{self._oid}@{self._tid}",
-                        "client-request-id": client_request_id,
-                        "client-session-id": client_session_id,
-                        "x-client-language": "en-us",
-                        "x-client-localtime": datetime.now().astimezone().isoformat(timespec="milliseconds"),
-                    },
+                    headers=unfurl_headers,
                     json=unfurl_body,
                 )
+                if unfurl_response.status_code >= 400:
+                    logger.warning(
+                        "Copilot unfurl failed: status=%s account_mode=%s "
+                        "search_expires_at=%s graph_expires_at=%s cvid=%s logical_id=%s "
+                        "headers=%s response=%s",
+                        unfurl_response.status_code,
+                        self._auth_session.account_mode,
+                        self._auth_session.search_expires_at,
+                        self._auth_session.graph_expires_at,
+                        conversation_id,
+                        logical_id,
+                        _sanitize_unfurl_headers_for_log(unfurl_headers),
+                        _truncate_for_log(unfurl_response.text),
+                    )
                 unfurl_response.raise_for_status()
         except SubstrateCopilotError:
             raise
@@ -715,6 +731,22 @@ def _extract_conversation_id(value: object) -> str | None:
 def _is_retryable_personal_handshake_error(exc: Exception) -> bool:
     message = str(exc).lower()
     return "timed out during handshake" in message or isinstance(exc, TimeoutError)
+
+
+def _sanitize_unfurl_headers_for_log(headers: dict[str, str]) -> dict[str, str]:
+    redacted: dict[str, str] = {}
+    for key, value in headers.items():
+        if key.lower() == "authorization":
+            redacted[key] = "<redacted>"
+        else:
+            redacted[key] = value
+    return redacted
+
+
+def _truncate_for_log(text: str, limit: int = 1000) -> str:
+    if len(text) <= limit:
+        return text
+    return f"{text[:limit]}...<truncated {len(text) - limit} chars>"
 
 
 def _message_annotation_type(attachment: UploadedAttachment) -> str:
